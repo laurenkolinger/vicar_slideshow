@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VICAR Lab · Screensaver</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,300;1,9..144,400&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --magenta:      #E20074;
+    --magenta-soft: #FF3D9A;
+    --abyss:        #050B14;
+    --navy:         #0B1B2B;
+    --bone:         #F4EFE6;
+    --rule:         rgba(244,239,230,0.18);
+    --muted:        rgba(244,239,230,0.55);
+    --display: "Fraunces", "Iowan Old Style", Georgia, serif;
+    --serif:   "Instrument Serif", "Iowan Old Style", Georgia, serif;
+    --mono:    "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    height: 100%; background: var(--abyss); color: var(--bone);
+    font-family: var(--display); overflow: hidden; cursor: none;
+    -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+  }
+
+  /* Continuous horizontal strip. All slides laid out side-by-side,
+     duplicated once so the keyframe shift of -50% / 0% loops seamlessly.
+     Direction = "left to right": content enters from the LEFT edge and
+     exits on the RIGHT. */
+  #strip {
+    position: absolute; top: 0; left: 0;
+    height: 100vh;
+    display: flex;
+    align-items: stretch;
+    will-change: transform;
+  }
+  #strip.rolling {
+    animation: roll var(--dur, 300s) linear infinite;
+  }
+  @keyframes roll {
+    from { transform: translateX(-50%); }
+    to   { transform: translateX(0);    }
+  }
+
+  .card {
+    position: relative;
+    height: 100vh;
+    flex: 0 0 auto;
+    background: var(--abyss);
+    border-right: 1px solid rgba(0,0,0,0.6);
+    overflow: hidden;
+  }
+  .card img,
+  .card video {
+    display: block;
+    height: 100vh;
+    width: auto;            /* natural aspect, sized to viewport height */
+    max-width: 180vh;       /* clamp absurdly wide videos */
+    object-fit: cover;
+  }
+
+  /* Caption overlay anchored to each card — moves with the image */
+  .cap {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    padding: 28px clamp(20px, 2.5vw, 44px) 36px;
+    background: linear-gradient(to top, rgba(5,11,20,0.96) 0%,
+                                        rgba(5,11,20,0.78) 45%,
+                                        rgba(5,11,20,0) 100%);
+    color: var(--bone);
+    pointer-events: none;
+  }
+  .cap-meta {
+    display: flex; align-items: center; gap: 12px;
+    font-family: var(--mono); font-size: 11px;
+    letter-spacing: 0.2em; text-transform: uppercase;
+    margin-bottom: 10px;
+  }
+  .cap-meta .rule { width: 32px; height: 1px; background: var(--magenta); flex: 0 0 32px; }
+  .cap-meta .num  { color: var(--magenta-soft); }
+  .cap-meta .sep  { color: var(--muted); }
+  .cap-meta .chap { color: var(--bone); }
+  .cap-text {
+    font-family: var(--display); font-weight: 400;
+    font-size: clamp(18px, 1.7vh, 24px);
+    line-height: 1.35;
+    color: var(--bone);
+    max-width: 70ch;
+    text-shadow: 0 2px 12px rgba(0,0,0,0.6);
+  }
+  .cap-credit {
+    margin-top: 8px;
+    font-family: var(--serif); font-style: italic;
+    font-size: 14px;
+    color: var(--muted);
+    max-width: 70ch;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  /* Soft fade at the screen edges so cards enter/exit gracefully */
+  .edge-fade {
+    position: fixed; inset: 0; pointer-events: none; z-index: 30;
+    background:
+      linear-gradient(to right, var(--abyss) 0%, rgba(5,11,20,0) 6%, rgba(5,11,20,0) 94%, var(--abyss) 100%);
+  }
+
+  /* Grain */
+  .grain {
+    position: fixed; inset: 0; pointer-events: none;
+    opacity: 0.10; mix-blend-mode: overlay; z-index: 5;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='1.4' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .55 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+  }
+
+  /* Top brand strip */
+  #brand {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 40;
+    padding: 14px clamp(20px, 3vw, 48px);
+    display: flex; align-items: center; gap: 16px;
+    background: linear-gradient(to bottom, rgba(0,0,0,0.85), transparent);
+    pointer-events: none;
+    font-family: var(--mono); font-size: 11px;
+    letter-spacing: 0.2em; text-transform: uppercase;
+    color: var(--muted);
+  }
+  #brand .name { color: var(--bone); letter-spacing: 0.22em; }
+  #brand .dot  { color: var(--magenta); margin: 0 8px; }
+  #brand .tag  {
+    margin-left: auto;
+    font-family: var(--serif); font-style: italic;
+    font-size: 14px; letter-spacing: 0.04em; text-transform: none;
+    color: var(--bone);
+  }
+  #brand .clock { color: var(--bone); font-family: var(--mono); font-size: 12px; letter-spacing: 0.16em; margin-left: 24px; }
+
+  /* Status while booting */
+  #status {
+    position: fixed; top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    text-align: center; z-index: 80;
+    pointer-events: none;
+    max-width: 640px; padding: 36px;
+    color: var(--bone);
+    transition: opacity 0.4s;
+  }
+  #status.hidden { opacity: 0; }
+  #status .head {
+    font-family: var(--display); font-weight: 500; font-size: 36px;
+    margin-bottom: 10px; letter-spacing: -0.01em;
+  }
+  #status .body { font-family: var(--serif); font-style: italic; font-size: 17px; color: var(--muted); }
+  #status code {
+    font-family: var(--mono); font-size: 13px; color: var(--magenta-soft);
+    background: rgba(226,0,116,0.08); padding: 2px 6px;
+    border: 1px solid rgba(226,0,116,0.25);
+  }
+
+  #hint {
+    position: fixed; bottom: 14px; right: 18px; z-index: 50;
+    font-family: var(--mono); font-size: 10px;
+    letter-spacing: 0.18em; text-transform: uppercase;
+    color: rgba(244,239,230,0.30);
+    pointer-events: none;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.8);
+  }
+
+  /* Dim overlay sits above all imagery but below the brightness indicator
+     so the readout stays visible when fully dimmed. */
+  #dim {
+    position: fixed; inset: 0; z-index: 90;
+    background: #000; opacity: 0;
+    pointer-events: none;
+    transition: opacity 150ms ease;
+  }
+  #brightness {
+    position: fixed; top: 50%; left: 50%;
+    transform: translate(-50%, -50%) scale(0.96);
+    z-index: 110;
+    pointer-events: none;
+    padding: 18px 28px;
+    background: rgba(5,11,20,0.78);
+    border: 1px solid var(--rule);
+    border-left: 2px solid var(--magenta);
+    color: var(--bone);
+    font-family: var(--mono); font-size: 13px;
+    letter-spacing: 0.22em; text-transform: uppercase;
+    opacity: 0;
+    transition: opacity 220ms ease, transform 220ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+  #brightness.visible {
+    opacity: 1; transform: translate(-50%, -50%) scale(1);
+  }
+  #brightness .bar {
+    display: block; margin-top: 10px;
+    width: 220px; height: 4px;
+    background: rgba(244,239,230,0.18);
+    position: relative;
+  }
+  #brightness .bar::after {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0;
+    width: var(--pct, 100%);
+    background: var(--magenta);
+    transition: width 150ms ease;
+  }
+</style>
+</head>
+<body>
+
+<div id="strip"></div>
+<div class="edge-fade"></div>
+<div class="grain"></div>
+
+<div id="brand">
+  <span class="name">VICAR<span class="dot">·</span>LAB</span>
+  <span>Screensaver</span>
+  <span class="tag">Virgin Islands Center for Autonomous Research</span>
+  <span class="clock" id="clock">--:--</span>
+</div>
+
+<div id="dim"></div>
+<div id="brightness">
+  <span id="brightness-label">BRIGHTNESS · 100%</span>
+  <span class="bar"></span>
+</div>
+<div id="hint">Move mouse / click / key to exit · ↑/↓ to dim & brighten</div>
+
+<div id="status">
+  <div class="head" id="status-head">Loading</div>
+  <div class="body" id="status-body">Preparing screensaver.</div>
+</div>
+
+<script>
+'use strict';
+
+const IMAGE_EXT = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif']);
+const VIDEO_EXT = new Set(['mp4', 'mov', 'webm', 'm4v']);
+
+const SPEED_PX_PER_SEC = 38;   // strip scroll speed (lower = slower)
+const MEDIA_LOAD_TIMEOUT_MS = 6000;
+const EXIT_GRACE_MS = 3500;    // ignore mouse/keys for this long after launch
+const EXIT_MOUSE_THRESHOLD_PX = 18;
+
+const state = {
+  slides: [],
+  folder: 'slideshow_media',
+};
+
+const $ = (id) => document.getElementById(id);
+
+function setStatus(head, html) {
+  $('status-head').textContent = head;
+  $('status-body').innerHTML = html;
+  $('status').classList.remove('hidden');
+}
+function hideStatus() { $('status').classList.add('hidden'); }
+
+// ============================================================
+// Data
+// ============================================================
+async function loadManifest() {
+  const r = await fetch('_manifest.json?t=' + Date.now());
+  if (!r.ok) throw new Error('Could not load _manifest.json — launch via start-screensaver.command to regenerate it.');
+  return r.json();
+}
+async function loadCaptions() {
+  const r = await fetch('captions.csv?t=' + Date.now());
+  if (!r.ok) return {};
+  return parseCsv(await r.text());
+}
+function parseCsv(text) {
+  const lines = text.replace(/\r\n?/g, '\n').split('\n');
+  if (!lines.length) return {};
+  const headers = parseCsvLine(lines[0]).map(h => h.trim());
+  const out = {};
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line || !line.trim()) continue;
+    const cells = parseCsvLine(line);
+    const row = {};
+    headers.forEach((h, idx) => { row[h] = (cells[idx] != null ? cells[idx] : '').trim(); });
+    if (row.title) out[row.title] = row;
+  }
+  return out;
+}
+function parseCsvLine(line) {
+  const out = []; let cur = ''; let q = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (q) {
+      if (c === '"') { if (line[i+1] === '"') { cur += '"'; i++; } else { q = false; } }
+      else cur += c;
+    } else {
+      if (c === ',') { out.push(cur); cur = ''; }
+      else if (c === '"') q = true;
+      else cur += c;
+    }
+  }
+  out.push(cur);
+  return out;
+}
+function parseFilename(file) {
+  const m = file.match(/^(\d+)[_-](.+)\.([^.]+)$/);
+  if (!m) return null;
+  return { num: m[1], title: m[2], ext: m[3].toLowerCase() };
+}
+function buildSlideList(manifest, captions) {
+  const list = [];
+  for (const file of manifest.files) {
+    const p = parseFilename(file);
+    if (!p) continue;
+    let type = null;
+    if (IMAGE_EXT.has(p.ext)) type = 'image';
+    else if (VIDEO_EXT.has(p.ext)) type = 'video';
+    if (!type) continue;
+    const cap = captions[p.title] || {};
+    list.push({
+      file,
+      url: `${manifest.folder || state.folder}/${encodeURIComponent(file)}`,
+      type, number: p.num, title: p.title,
+      caption: cap.caption || '',
+      credit:  cap.credit  || '',
+      chapter: cap.chapter || '',
+    });
+  }
+  return list;
+}
+
+// ============================================================
+// Card construction
+// ============================================================
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
+}
+
+function buildCard(slide) {
+  const card = document.createElement('div');
+  card.className = 'card';
+
+  let media;
+  if (slide.type === 'image') {
+    media = document.createElement('img');
+    media.alt = slide.title;
+    media.src = slide.url;
+  } else {
+    media = document.createElement('video');
+    media.muted = true;
+    media.loop = true;
+    media.playsInline = true;
+    media.setAttribute('playsinline', '');
+    // Light footprint: only fetch metadata so we know dimensions; the
+    // IntersectionObserver below calls play() when the card scrolls into view.
+    media.preload = 'metadata';
+    media.src = slide.url;
+  }
+  card.appendChild(media);
+
+  const cap = document.createElement('div');
+  cap.className = 'cap';
+  const metaBits = ['<span class="rule"></span>'];
+  if (slide.number)  metaBits.push(`<span class="num">${escapeHtml(slide.number)}</span>`);
+  if (slide.chapter) metaBits.push(`<span class="sep">/</span><span class="chap">${escapeHtml(slide.chapter.toUpperCase())}</span>`);
+  const text = slide.caption || slide.title;
+  cap.innerHTML = `
+    <div class="cap-meta">${metaBits.join('')}</div>
+    <div class="cap-text">${escapeHtml(text)}</div>
+    ${slide.credit ? `<div class="cap-credit">${escapeHtml(slide.credit)}</div>` : ''}
+  `;
+  card.appendChild(cap);
+
+  return { card, media };
+}
+
+function waitForMedia(media, type) {
+  return new Promise(resolve => {
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(); } };
+    if (type === 'image') {
+      if (media.complete && media.naturalWidth > 0) return finish();
+      media.addEventListener('load',  finish, { once: true });
+      media.addEventListener('error', finish, { once: true });
+    } else {
+      // For video we just need metadata (intrinsic dimensions) to measure.
+      if (media.readyState >= 1) return finish();
+      media.addEventListener('loadedmetadata', finish, { once: true });
+      media.addEventListener('error',          finish, { once: true });
+    }
+    setTimeout(finish, MEDIA_LOAD_TIMEOUT_MS);
+  });
+}
+
+async function buildStrip() {
+  const strip = $('strip');
+  strip.innerHTML = '';
+  const waiters = [];
+
+  // Build the strip twice for seamless looping.
+  for (let copy = 0; copy < 2; copy++) {
+    for (const slide of state.slides) {
+      const { card, media } = buildCard(slide);
+      strip.appendChild(card);
+      // Only wait on the first copy — second copy reuses the same URLs from cache.
+      if (copy === 0) waiters.push(waitForMedia(media, slide.type));
+    }
+  }
+
+  await Promise.all(waiters);
+  // One more frame to let the browser settle layout after media intrinsic sizes resolve.
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+  const total = strip.scrollWidth;     // both copies
+  const half  = total / 2;
+  if (half <= 0) {
+    setStatus('Could not measure strip', 'Media did not resolve sizes. Try relaunching.');
+    return;
+  }
+  const seconds = Math.max(60, Math.round(half / SPEED_PX_PER_SEC));
+  strip.style.setProperty('--dur', seconds + 's');
+  strip.classList.add('rolling');
+  hideStatus();
+
+  // Pause videos when they're off-screen to keep GPU/CPU sane during long idle.
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      const v = e.target;
+      if (e.isIntersecting) { v.play?.().catch(() => {}); }
+      else                  { v.pause?.(); }
+    }
+  }, { root: null, threshold: 0.01 });
+  document.querySelectorAll('#strip video').forEach(v => io.observe(v));
+}
+
+// ============================================================
+// Clock
+// ============================================================
+function tickClock() {
+  const d = new Date();
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  $('clock').textContent = `${hh}:${mm}`;
+}
+
+// ============================================================
+// Exit on any user input — but only after a grace period, and the
+// first mouse position post-grace is taken as a baseline so a static
+// cursor doesn't auto-quit. Movement past EXIT_MOUSE_THRESHOLD_PX,
+// any click, or any key all trigger exit.
+// ============================================================
+let exitArmed = false;
+let mouseBaseline = null;
+setTimeout(() => { exitArmed = true; }, EXIT_GRACE_MS);
+
+function exitSaver() {
+  if (document.fullscreenElement) document.exitFullscreen?.();
+  window.close();
+}
+
+document.addEventListener('mousemove', (e) => {
+  if (!exitArmed) return;
+  if (!mouseBaseline) { mouseBaseline = { x: e.clientX, y: e.clientY }; return; }
+  const dx = e.clientX - mouseBaseline.x;
+  const dy = e.clientY - mouseBaseline.y;
+  if (Math.hypot(dx, dy) > EXIT_MOUSE_THRESHOLD_PX) exitSaver();
+});
+document.addEventListener('click',     () => { if (exitArmed) exitSaver(); });
+document.addEventListener('mousedown', () => { if (exitArmed) exitSaver(); });
+document.addEventListener('keydown',   (e) => {
+  if (!exitArmed) return;
+  // Arrow up / down (or =/+ / -) adjust brightness instead of exiting.
+  if (e.key === 'ArrowUp'   || e.key === '+' || e.key === '=') { e.preventDefault(); adjustBrightness(+0.05); return; }
+  if (e.key === 'ArrowDown' || e.key === '-' || e.key === '_') { e.preventDefault(); adjustBrightness(-0.05); return; }
+  e.preventDefault();
+  exitSaver();
+});
+
+// ============================================================
+// Brightness dimming (5% steps, 5% minimum so it never goes black)
+// ============================================================
+let brightness = 1.0;
+let brightnessTimer = null;
+function adjustBrightness(delta) {
+  // Snap to nearest 5% to avoid float drift across many key presses.
+  const raw = brightness + delta;
+  brightness = Math.max(0.05, Math.min(1.0, Math.round(raw * 20) / 20));
+  const pct = Math.round(brightness * 100);
+  $('dim').style.opacity = (1 - brightness).toFixed(3);
+  const ind = $('brightness');
+  $('brightness-label').textContent = `BRIGHTNESS · ${pct}%`;
+  ind.style.setProperty('--pct', pct + '%');
+  ind.classList.add('visible');
+  clearTimeout(brightnessTimer);
+  brightnessTimer = setTimeout(() => ind.classList.remove('visible'), 1100);
+}
+
+// ============================================================
+// Boot
+// ============================================================
+(async function boot() {
+  if (location.protocol === 'file:') {
+    setStatus('Open via the launcher',
+      `Chrome blocks subfolder media over <code>file://</code>. Launch with <strong>start-screensaver.command</strong>.`);
+    return;
+  }
+  setStatus('Loading', 'Reading manifest and captions.');
+  try {
+    const [manifest, captions] = await Promise.all([loadManifest(), loadCaptions()]);
+    if (manifest.folder) state.folder = manifest.folder;
+    state.slides = buildSlideList(manifest, captions);
+    if (!state.slides.length) {
+      setStatus('No slides', 'Empty manifest. Drop files into <code>slideshow_media/</code> and relaunch.');
+      return;
+    }
+    setStatus('Loading', `Preparing ${state.slides.length} slides.`);
+    await buildStrip();
+    tickClock();
+    setInterval(tickClock, 30000);
+  } catch (e) {
+    setStatus('Boot error', e.message);
+  }
+})();
+</script>
+</body>
+</html>

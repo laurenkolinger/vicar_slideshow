@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VICAR Lab · Slideshow</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,300;1,9..144,400&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --magenta:      #E20074;
+    --magenta-soft: #FF3D9A;
+    --abyss:        #050B14;
+    --navy:         #0B1B2B;
+    --steel:        #4A6E8E;
+    --bone:         #F4EFE6;
+    --bone-2:       #E8E0D2;
+    --rule:         rgba(244,239,230,0.18);
+    --muted:        rgba(244,239,230,0.55);
+    --display: "Fraunces", "Iowan Old Style", Georgia, serif;
+    --serif:   "Instrument Serif", "Iowan Old Style", Georgia, serif;
+    --mono:    "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    --crossfade-ms: 1100ms;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    height: 100%; background: var(--abyss); color: var(--bone);
+    font-family: var(--display); overflow: hidden;
+    -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+  }
+
+  /* Stage + grid share a position and animate between visible/hidden states.
+     Grid sits above stage in the z-stack so the cross-fade looks like zooming out. */
+  #stage {
+    position: fixed; inset: 0; background: var(--abyss);
+    transform-origin: center center;
+    transition: transform 480ms cubic-bezier(0.22, 0.61, 0.36, 1),
+                opacity 360ms ease;
+  }
+  #stage.zoomed-out {
+    transform: scale(0.82);
+    opacity: 0;
+    pointer-events: none;
+  }
+  .slide-layer {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    opacity: 0; transition: opacity var(--crossfade-ms) cubic-bezier(0.4, 0, 0.2, 1);
+    will-change: opacity;
+  }
+  .slide-layer.active { opacity: 1; }
+  .slide-layer img {
+    max-width: 100%; max-height: 100%;
+    object-fit: contain;
+    transform-origin: center center;
+  }
+  /* Ken Burns: subtle, randomized direction per slide. Duration is set
+     dynamically in JS so it lasts the whole slide. */
+  .slide-layer img.kb {
+    animation-duration: var(--kb-ms, 8000ms);
+    animation-timing-function: ease-out;
+    animation-fill-mode: forwards;
+    will-change: transform;
+  }
+  .slide-layer img.kb1 { animation-name: kb1; }
+  .slide-layer img.kb2 { animation-name: kb2; }
+  .slide-layer img.kb3 { animation-name: kb3; }
+  .slide-layer img.kb4 { animation-name: kb4; }
+  .slide-layer img.kb5 { animation-name: kb5; }
+  .slide-layer img.kb6 { animation-name: kb6; }
+  @keyframes kb1 {
+    from { transform: scale(1.00) translate(0,     0); }
+    to   { transform: scale(1.12) translate(-3%,  -2%); }
+  }
+  @keyframes kb2 {
+    from { transform: scale(1.12) translate( 3%,  2%); }
+    to   { transform: scale(1.00) translate(0,    0); }
+  }
+  @keyframes kb3 {
+    from { transform: scale(1.00) translate( 2%,  0); }
+    to   { transform: scale(1.10) translate(-3%, -2%); }
+  }
+  @keyframes kb4 {
+    from { transform: scale(1.10) translate(-3%, 2%); }
+    to   { transform: scale(1.00) translate(0,   0); }
+  }
+  @keyframes kb5 {
+    from { transform: scale(1.04) translate(-2%, 0); }
+    to   { transform: scale(1.14) translate( 3%, -2%); }
+  }
+  @keyframes kb6 {
+    from { transform: scale(1.04) translate( 2%, -2%); }
+    to   { transform: scale(1.14) translate(-3%, 2%); }
+  }
+
+  /* Videos fit fully inside the frame at native resolution.
+     No upscaling, no cropping. Letterboxes for portrait/wide aspect ratios. */
+  .slide-layer video {
+    max-width: 100%;
+    max-height: 100%;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+  }
+
+  /* Ambient grain to match the site */
+  .grain {
+    position: fixed; inset: 0; pointer-events: none;
+    opacity: 0.10; mix-blend-mode: overlay; z-index: 1;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='1.4' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .55 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+  }
+
+  /* ============================================================ */
+  /* Top caption bar — solid black                                 */
+  /* ============================================================ */
+  #cap {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 50;
+    background: #000;
+    padding: 16px clamp(20px, 4vw, 56px) 22px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .cap-eyebrow {
+    display: flex; align-items: center; gap: 14px;
+    font-family: var(--mono); font-size: 11px;
+    letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--bone); margin-bottom: 10px;
+  }
+  .cap-eyebrow .rule { flex: 0 0 36px; height: 1px; background: var(--magenta); }
+  .cap-eyebrow .num { color: var(--magenta-soft); }
+  .cap-eyebrow .sep { color: var(--muted); }
+  .cap-eyebrow .chapter { color: var(--bone); }
+  .cap-eyebrow .title-id { color: var(--muted); font-size: 10px; letter-spacing: 0.14em; }
+
+  .cap-caption {
+    font-family: var(--display);
+    font-style: normal;
+    font-weight: 400;
+    font-size: clamp(17px, 1.95vw, 23px);
+    line-height: 1.4;
+    color: var(--bone);
+    max-width: 100ch;
+  }
+
+  .cap-progress {
+    position: absolute; left: 0; bottom: -1px; height: 2px;
+    background: var(--magenta); width: 0%;
+    transition: width 200ms linear;
+  }
+
+  /* ============================================================ */
+  /* Bottom HUD                                                    */
+  /* ============================================================ */
+  #hud {
+    position: fixed; bottom: 0; left: 0; right: 0; z-index: 50;
+    background: #000; border-top: 1px solid var(--rule);
+    padding: 12px clamp(20px, 4vw, 56px);
+    display: flex; align-items: center; gap: clamp(14px, 2.4vw, 28px);
+    font-family: var(--mono); font-size: 11px;
+    letter-spacing: 0.12em; color: var(--muted);
+    text-transform: uppercase;
+  }
+  #hud .brand { color: var(--bone); letter-spacing: 0.18em; }
+  #hud .brand .dot { color: var(--magenta); margin: 0 6px; }
+  #hud .counter { color: var(--bone); }
+  #hud .credit {
+    color: var(--muted); margin-left: auto; max-width: 50ch;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    text-transform: none; letter-spacing: 0.04em;
+    font-family: var(--serif); font-style: italic; font-size: 13px;
+  }
+  .hud-btn {
+    background: none; border: 1px solid var(--rule); color: var(--bone);
+    padding: 6px 12px; font-family: var(--mono); font-size: 10.5px;
+    letter-spacing: 0.14em; text-transform: uppercase; cursor: pointer;
+    transition: color 0.18s, border-color 0.18s, background 0.18s;
+  }
+  .hud-btn:hover { color: var(--magenta-soft); border-color: var(--magenta); background: rgba(226,0,116,0.06); }
+  .hud-btn.active { color: var(--magenta-soft); border-color: var(--magenta); }
+  .hud-group { display: flex; gap: 0; }
+  .hud-group .hud-btn { border-right: 0; }
+  .hud-group .hud-btn:last-child { border-right: 1px solid var(--rule); }
+  .hud-group .hud-btn:hover { border-right-color: var(--magenta); }
+
+  /* Grid view */
+  #grid {
+    position: fixed; inset: 0; background: var(--abyss);
+    overflow-y: auto;
+    padding: 130px clamp(20px, 4vw, 56px) 90px;
+    z-index: 40;
+    transform-origin: center center;
+    transition: transform 480ms cubic-bezier(0.22, 0.61, 0.36, 1),
+                opacity 360ms ease;
+  }
+  #grid.zoomed-out {
+    opacity: 0;
+    transform: scale(1.08);
+    pointer-events: none;
+  }
+  .cell {
+    position: relative; aspect-ratio: 4/3;
+    background: var(--navy); border: 1px solid transparent;
+    cursor: pointer; overflow: hidden; padding: 0;
+    opacity: 0; transform: translateY(8px);
+    transition: opacity 380ms ease, transform 380ms cubic-bezier(0.22, 0.61, 0.36, 1), border-color 0.25s;
+    transition-delay: var(--cell-delay, 0ms);
+  }
+  #grid.revealed .cell { opacity: 0.78; transform: translateY(0); }
+  #grid.revealed .cell:hover { opacity: 1; transform: translateY(-2px); border-color: var(--rule); }
+  #grid.revealed .cell.current { border-color: var(--magenta); opacity: 1; }
+  .grid-head {
+    max-width: 1800px; margin: 0 auto 28px;
+    display: flex; align-items: baseline; gap: 18px;
+    padding-bottom: 14px; border-bottom: 1px solid var(--rule);
+  }
+  .grid-head h2 {
+    font-family: var(--display); font-weight: 500; font-size: 30px;
+    letter-spacing: -0.01em;
+  }
+  .grid-head h2 em { font-family: var(--serif); font-style: italic; font-weight: 400; }
+  .grid-head .meta {
+    font-family: var(--mono); font-size: 11px;
+    letter-spacing: 0.18em; text-transform: uppercase; color: var(--muted);
+  }
+  .chapter-section { max-width: 1800px; margin: 0 auto 36px; }
+  .chapter-section .head {
+    font-family: var(--mono); font-size: 11px;
+    letter-spacing: 0.2em; text-transform: uppercase;
+    color: var(--magenta-soft);
+    margin: 18px 0 12px;
+    display: flex; align-items: center; gap: 14px;
+  }
+  .chapter-section .head::before { content: ""; width: 36px; height: 1px; background: var(--magenta); }
+  .chapter-section .head .name { color: var(--bone); }
+  .chapter-section .head .count { color: var(--muted); }
+  .chapter-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px;
+  }
+  .cell img { width: 100%; height: 100%; object-fit: cover; display: block; transition: transform 0.5s; }
+  #grid.revealed .cell:hover img { transform: scale(1.04); }
+  .cell-label {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    padding: 26px 10px 8px;
+    background: linear-gradient(to top, rgba(5,11,20,0.95), transparent);
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.06em;
+    color: var(--bone);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .cell-num {
+    position: absolute; top: 8px; left: 10px;
+    font-family: var(--mono); font-size: 10px; color: var(--bone);
+    text-shadow: 0 1px 4px rgba(0,0,0,0.9);
+  }
+  .video-badge {
+    position: absolute; top: 8px; right: 10px;
+    background: rgba(0,0,0,0.7); color: var(--bone);
+    font-size: 9px; padding: 3px 7px;
+    font-family: var(--mono); letter-spacing: 0.12em;
+    border: 1px solid rgba(255,255,255,0.18);
+  }
+
+  /* Status & toast */
+  #status {
+    position: fixed; top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    text-align: center; z-index: 80;
+    pointer-events: none;
+    max-width: 640px; padding: 36px;
+    transition: opacity 0.3s;
+  }
+  #status.hidden { opacity: 0; }
+  #status .head {
+    font-family: var(--display); font-weight: 500; font-size: 36px;
+    color: var(--bone); margin-bottom: 12px; letter-spacing: -0.01em;
+  }
+  #status .body {
+    font-family: var(--serif); font-style: italic;
+    font-size: 17px; line-height: 1.5; color: var(--bone-2);
+  }
+  #status code {
+    font-family: var(--mono); font-size: 13px;
+    color: var(--magenta-soft);
+    background: rgba(226,0,116,0.08);
+    padding: 2px 6px;
+    border: 1px solid rgba(226,0,116,0.25);
+  }
+  .toast {
+    position: fixed; bottom: 70px; left: 50%;
+    transform: translateX(-50%) translateY(8px);
+    background: rgba(5,11,20,0.96);
+    border: 1px solid var(--rule); border-left: 2px solid var(--magenta);
+    color: var(--bone); padding: 10px 16px;
+    font-family: var(--mono); font-size: 11px;
+    letter-spacing: 0.14em; text-transform: uppercase;
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.3s, transform 0.3s; z-index: 300;
+  }
+  .toast.visible { opacity: 1; transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <div class="slide-layer" id="layer-a"></div>
+  <div class="slide-layer" id="layer-b"></div>
+</div>
+<div class="grain"></div>
+
+<div id="cap">
+  <div class="cap-eyebrow">
+    <span class="rule"></span>
+    <span class="num" id="cap-num">--</span>
+    <span class="sep">/</span>
+    <span class="chapter" id="cap-chapter">VICAR LAB</span>
+    <span class="sep">·</span>
+    <span class="title-id" id="cap-title-id"></span>
+  </div>
+  <div class="cap-caption" id="cap-caption">Loading…</div>
+  <div class="cap-progress" id="cap-progress"></div>
+</div>
+
+<div id="grid" class="zoomed-out" hidden>
+  <div class="grid-head">
+    <h2>The VICAR Lab <em>slideshow</em></h2>
+    <span class="meta" id="grid-count"></span>
+  </div>
+  <div id="grid-root"></div>
+</div>
+
+<div id="hud">
+  <span class="brand">VICAR<span class="dot">·</span>LAB</span>
+  <span class="counter" id="counter">00 / 00</span>
+  <div class="hud-group">
+    <button class="hud-btn" data-dur="3000">3s</button>
+    <button class="hud-btn active" data-dur="6000">6s</button>
+    <button class="hud-btn" data-dur="10000">10s</button>
+  </div>
+  <button class="hud-btn" id="btn-prev">&larr; prev</button>
+  <button class="hud-btn" id="btn-next">next &rarr;</button>
+  <button class="hud-btn" id="btn-grid">grid</button>
+  <button class="hud-btn" id="btn-full">fullscreen</button>
+  <span class="credit" id="credit"></span>
+</div>
+
+<div id="status">
+  <div class="head" id="status-head">Loading</div>
+  <div class="body" id="status-body">Preparing slideshow.</div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+'use strict';
+
+const IMAGE_EXT = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif']);
+const VIDEO_EXT = new Set(['mp4', 'mov', 'webm', 'm4v']);
+
+const state = {
+  mode: 'slideshow',
+  slides: [],
+  currentIndex: 0,
+  duration: 6000,
+  timer: null,
+  activeLayer: 'a',
+  folder: 'slideshow_media',
+};
+
+const $ = (id) => document.getElementById(id);
+
+function setStatus(head, bodyHtml) {
+  $('status-head').textContent = head;
+  $('status-body').innerHTML = bodyHtml;
+  $('status').classList.remove('hidden');
+}
+function hideStatus() { $('status').classList.add('hidden'); }
+function toast(msg) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('visible');
+  clearTimeout(t._t);
+  t._t = setTimeout(() => t.classList.remove('visible'), 2400);
+}
+
+// ============================================================
+// Manifest + CSV loading
+// ============================================================
+async function loadManifest() {
+  const r = await fetch('_manifest.json?t=' + Date.now());
+  if (!r.ok) throw new Error('Could not load _manifest.json — relaunch using start-slideshow.command to regenerate it.');
+  return r.json();
+}
+
+async function loadCaptions() {
+  const r = await fetch('captions.csv?t=' + Date.now());
+  if (!r.ok) return {};
+  return parseCsv(await r.text());
+}
+
+function parseCsv(text) {
+  const lines = text.replace(/\r\n?/g, '\n').split('\n');
+  if (!lines.length) return {};
+  const headers = parseCsvLine(lines[0]).map(h => h.trim());
+  const out = {};
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line || !line.trim()) continue;
+    const cells = parseCsvLine(line);
+    const row = {};
+    headers.forEach((h, idx) => { row[h] = (cells[idx] != null ? cells[idx] : '').trim(); });
+    if (row.title) out[row.title] = row;
+  }
+  return out;
+}
+
+function parseCsvLine(line) {
+  const out = []; let cur = ''; let q = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (q) {
+      if (c === '"') {
+        if (line[i+1] === '"') { cur += '"'; i++; }
+        else { q = false; }
+      } else { cur += c; }
+    } else {
+      if (c === ',') { out.push(cur); cur = ''; }
+      else if (c === '"') { q = true; }
+      else { cur += c; }
+    }
+  }
+  out.push(cur);
+  return out;
+}
+
+function parseFilename(file) {
+  // NN_title-with-dashes.ext  →  { num, title, ext }
+  const m = file.match(/^(\d+)[_-](.+)\.([^.]+)$/);
+  if (!m) return null;
+  return { num: m[1], title: m[2], ext: m[3].toLowerCase() };
+}
+
+function buildSlides(manifest, captions) {
+  const list = [];
+  for (const file of manifest.files) {
+    const p = parseFilename(file);
+    if (!p) continue;
+    let type = null;
+    if (IMAGE_EXT.has(p.ext)) type = 'image';
+    else if (VIDEO_EXT.has(p.ext)) type = 'video';
+    if (!type) continue;
+    const cap = captions[p.title] || {};
+    list.push({
+      file,
+      url: `${manifest.folder || state.folder}/${encodeURIComponent(file)}`,
+      type,
+      number: p.num,
+      title: p.title,
+      caption: cap.caption || '',
+      credit: cap.credit || '',
+      chapter: cap.chapter || '',
+    });
+  }
+  return list;
+}
+
+// ============================================================
+// Slideshow rendering
+// ============================================================
+function showSlide(index) {
+  const slide = state.slides[index];
+  if (!slide) return;
+
+  const nextKey = state.activeLayer === 'a' ? 'b' : 'a';
+  const incoming = $(`layer-${nextKey}`);
+  const outgoing = $(`layer-${state.activeLayer}`);
+  cleanupLayer(incoming);
+
+  let media;
+  if (slide.type === 'image') {
+    media = document.createElement('img');
+    media.alt = slide.title;
+    // Pick one of six Ken Burns directions and start it as soon as the image
+    // is decoded. Listener attached BEFORE src so cached images still trigger.
+    const startKenBurns = () => {
+      hideStatus();
+      const kbn = 1 + Math.floor(Math.random() * 6);
+      media.style.setProperty('--kb-ms', (state.duration + 1200) + 'ms');
+      requestAnimationFrame(() => media.classList.add('kb', 'kb' + kbn));
+    };
+    media.addEventListener('load', startKenBurns);
+    media.addEventListener('error', () => onMediaError(slide));
+    media.src = slide.url;
+    // Safety net for cached images where 'load' may have already fired
+    if (media.complete && media.naturalWidth > 0) startKenBurns();
+  } else {
+    media = document.createElement('video');
+    media.src = slide.url;
+    media.muted = true;
+    media.autoplay = true;
+    media.playsInline = true;
+    media.setAttribute('playsinline', '');
+    media.addEventListener('loadeddata', hideStatus);
+    media.addEventListener('ended', () => { if (state.mode === 'slideshow') advance(); }, { once: true });
+    media.addEventListener('error', () => onMediaError(slide));
+  }
+  incoming.appendChild(media);
+
+  requestAnimationFrame(() => {
+    incoming.classList.add('active');
+    outgoing.classList.remove('active');
+  });
+  state.activeLayer = nextKey;
+
+  clearTimeout(state.timer);
+  if (slide.type === 'image') {
+    state.timer = setTimeout(advance, state.duration);
+    startProgress(state.duration);
+  } else {
+    state.timer = setTimeout(advance, 120000); // long safety for videos
+    startProgress(Math.min(state.duration * 2, 24000));
+  }
+
+  updateCaption(slide, index);
+}
+
+function onMediaError(slide) {
+  setStatus('Could not load', `<code>${slide.file}</code><br><br>If you opened this with <code>file://</code>, close the tab and double-click <strong>start-slideshow.command</strong> — Chrome blocks local subfolder media without a server.`);
+  clearTimeout(state.timer);
+  state.timer = setTimeout(advance, 3500);
+}
+
+function cleanupLayer(layer) {
+  const v = layer.querySelector('video');
+  if (v) { try { v.pause(); } catch (e) {} }
+  layer.innerHTML = '';
+}
+
+function advance() {
+  state.currentIndex = (state.currentIndex + 1) % state.slides.length;
+  showSlide(state.currentIndex);
+}
+function previous() {
+  state.currentIndex = (state.currentIndex - 1 + state.slides.length) % state.slides.length;
+  showSlide(state.currentIndex);
+}
+
+function updateCaption(slide, index) {
+  const total = state.slides.length;
+  const pad = String(total).length;
+  const n = String(index + 1).padStart(pad, '0');
+  $('cap-num').textContent = slide.number || n;
+  $('cap-chapter').textContent = (slide.chapter || 'VICAR LAB').toUpperCase();
+  $('cap-title-id').textContent = slide.title;
+  $('cap-caption').textContent = slide.caption || '(no caption found in captions.csv for title "' + slide.title + '")';
+  $('counter').textContent = `${n} / ${total}`;
+  $('credit').textContent = slide.credit ? slide.credit : '';
+}
+
+function startProgress(durationMs) {
+  const bar = $('cap-progress');
+  bar.style.transition = 'none';
+  bar.style.width = '0%';
+  void bar.offsetWidth;
+  bar.style.transition = `width ${durationMs}ms linear`;
+  bar.style.width = '100%';
+}
+
+// ============================================================
+// Grid (chapter-grouped)
+// ============================================================
+function showGrid() {
+  state.mode = 'grid';
+  clearTimeout(state.timer);
+  document.querySelectorAll('video').forEach(v => { try { v.pause(); } catch (e) {} });
+  $('cap-progress').style.width = '0%';
+
+  renderGrid();
+  $('grid').hidden = false;
+  // Force a reflow so the initial state (zoomed-out) is registered before we
+  // remove it - that gives us a smooth animation instead of a snap-in.
+  void $('grid').offsetWidth;
+  // Animate: stage shrinks + fades, grid drops back to natural size + fades in,
+  // then cells stagger in.
+  requestAnimationFrame(() => {
+    $('stage').classList.add('zoomed-out');
+    $('grid').classList.remove('zoomed-out');
+    // Slight delay before the cells start revealing so the grid container has
+    // time to settle into its final transform.
+    setTimeout(() => $('grid').classList.add('revealed'), 80);
+  });
+}
+
+function startSlideshow() {
+  state.mode = 'slideshow';
+  $('grid').classList.remove('revealed');
+  $('grid').classList.add('zoomed-out');
+  $('stage').classList.remove('zoomed-out');
+  // Build the new slide so it's ready underneath the fading grid.
+  showSlide(state.currentIndex);
+  // After the transition finishes, hard-hide grid so it doesn't intercept clicks.
+  setTimeout(() => { $('grid').hidden = true; }, 500);
+}
+function videoThumbUrl(slide) {
+  // For videos, look in _thumbs/<base>.jpg where base is the filename minus extension.
+  const base = slide.file.replace(/\.[^.]+$/, '');
+  return `_thumbs/${encodeURIComponent(base)}.jpg`;
+}
+
+function renderGrid() {
+  const root = $('grid-root');
+  root.innerHTML = '';
+  $('grid-count').textContent = `${state.slides.length} slides`;
+
+  // group by chapter (preserve first-seen order)
+  const order = []; const groups = {};
+  state.slides.forEach((s, i) => {
+    const key = s.chapter || 'Unfiled';
+    if (!groups[key]) { groups[key] = []; order.push(key); }
+    groups[key].push({ slide: s, index: i });
+  });
+
+  let cellCounter = 0;
+  for (const key of order) {
+    const items = groups[key];
+    const section = document.createElement('div');
+    section.className = 'chapter-section';
+    const head = document.createElement('div');
+    head.className = 'head';
+    head.innerHTML = `<span class="name">${key.toUpperCase()}</span><span class="count">· ${items.length} items</span>`;
+    section.appendChild(head);
+
+    const grid = document.createElement('div');
+    grid.className = 'chapter-grid';
+
+    items.forEach(({ slide, index }) => {
+      const cell = document.createElement('button');
+      cell.className = 'cell' + (index === state.currentIndex ? ' current' : '');
+      // Staggered reveal — each cell waits a bit longer than the previous one.
+      cell.style.setProperty('--cell-delay', (cellCounter * 22) + 'ms');
+      cellCounter++;
+      cell.addEventListener('click', () => {
+        state.currentIndex = index;
+        startSlideshow();
+      });
+
+      const num = document.createElement('span');
+      num.className = 'cell-num';
+      num.textContent = slide.number;
+      cell.appendChild(num);
+
+      const img = document.createElement('img');
+      img.loading = 'lazy';
+      if (slide.type === 'image') {
+        img.src = slide.url;
+      } else {
+        // First-frame thumbnail from _thumbs/ folder
+        img.src = videoThumbUrl(slide);
+        // If the thumb is missing, hide the broken-image icon by clearing src
+        img.addEventListener('error', () => { img.removeAttribute('src'); }, { once: true });
+      }
+      cell.appendChild(img);
+
+      if (slide.type === 'video') {
+        const badge = document.createElement('span');
+        badge.className = 'video-badge';
+        badge.textContent = 'VIDEO';
+        cell.appendChild(badge);
+      }
+
+      const label = document.createElement('span');
+      label.className = 'cell-label';
+      label.textContent = slide.title;
+      cell.appendChild(label);
+
+      grid.appendChild(cell);
+    });
+    section.appendChild(grid);
+    root.appendChild(section);
+  }
+}
+
+// ============================================================
+// Controls
+// ============================================================
+document.querySelectorAll('.hud-btn[data-dur]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.hud-btn[data-dur]').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    state.duration = parseInt(btn.dataset.dur, 10);
+    toast(`Slide duration · ${state.duration / 1000}s`);
+    if (state.mode === 'slideshow') {
+      const cur = state.slides[state.currentIndex];
+      if (cur && cur.type === 'image') {
+        clearTimeout(state.timer);
+        state.timer = setTimeout(advance, state.duration);
+        startProgress(state.duration);
+      }
+    }
+  });
+});
+
+$('btn-prev').addEventListener('click', () => { if (state.mode === 'slideshow') previous(); });
+$('btn-next').addEventListener('click', () => { if (state.mode === 'slideshow') advance(); });
+$('btn-grid').addEventListener('click', () => { if (state.mode === 'grid') startSlideshow(); else showGrid(); });
+$('btn-full').addEventListener('click', () => {
+  if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
+  else document.exitFullscreen?.();
+});
+$('stage').addEventListener('click', () => { if (state.mode === 'slideshow') advance(); });
+
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  switch (e.key) {
+    case ' ':
+      e.preventDefault();
+      if (state.mode === 'slideshow') showGrid(); else startSlideshow();
+      break;
+    case 'Escape':
+      e.preventDefault();
+      if (state.mode === 'grid') startSlideshow(); else showGrid();
+      break;
+    case 'ArrowRight': if (state.mode === 'slideshow') advance(); break;
+    case 'ArrowLeft':  if (state.mode === 'slideshow') previous(); break;
+    case 'f': case 'F':
+      if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
+      else document.exitFullscreen?.();
+      break;
+  }
+});
+
+// ============================================================
+// Boot
+// ============================================================
+(async function boot() {
+  if (location.protocol === 'file:') {
+    setStatus(
+      'Open via the launcher',
+      `You opened this with <code>file://</code>. Chrome blocks the media folder over <code>file://</code>.<br><br>` +
+      `Close this tab and double-click <strong>start-slideshow.command</strong>.`
+    );
+    return;
+  }
+  setStatus('Loading', 'Reading manifest and captions.');
+  try {
+    const [manifest, captions] = await Promise.all([loadManifest(), loadCaptions()]);
+    if (manifest.folder) state.folder = manifest.folder;
+    state.slides = buildSlides(manifest, captions);
+    if (!state.slides.length) {
+      setStatus('No slides', 'The manifest is empty. Drop files into <code>slideshow_media/</code> with the form <code>NN_title.ext</code>, then relaunch <code>start-slideshow.command</code>.');
+      return;
+    }
+    setStatus('Loading', `${state.slides.length} slides queued.`);
+    showSlide(0);
+  } catch (e) {
+    setStatus('Boot error', e.message + '<br><br>Relaunch using <strong>start-slideshow.command</strong> to regenerate the manifest.');
+  }
+})();
+</script>
+</body>
+</html>

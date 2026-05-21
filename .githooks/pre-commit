@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# pre-commit: keep heavy media out of the vicar_slideshow repo.
+#
+# slideshow_media/ and _thumbs/ are gitignored, so this hook is the backstop
+# against `git add -f <media>` and against any oversized file slipping in --
+# GitHub hard-rejects files larger than 100 MB on push, which would strand the
+# whole commit. Blocks: anything under the media dirs, or any file over 95 MB.
+set -euo pipefail
+
+max_bytes=$((95 * 1024 * 1024))   # 95 MB, just under GitHub's 100 MB ceiling
+blocked=""
+
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    case "$f" in
+        slideshow/slideshow_media/*|*/slideshow_media/*|slideshow/_thumbs/*|*/_thumbs/*)
+            blocked+="  [media dir]  $f"$'\n' ;;
+    esac
+    if [ -f "$f" ]; then
+        size=$(wc -c < "$f")
+        if [ "$size" -gt "$max_bytes" ]; then
+            blocked+="  [over 95 MB] $f ($((size / 1024 / 1024)) MB)"$'\n'
+        fi
+    fi
+done < <(git diff --cached --name-only --diff-filter=ACM)
+
+if [ -n "$blocked" ]; then
+    echo "pre-commit blocked -- heavy/media files must not be committed:" >&2
+    printf '%s' "$blocked" >&2
+    echo "" >&2
+    echo "Media lives in slideshow/slideshow_media/ (gitignored) and ships" >&2
+    echo "out-of-band. GitHub rejects files over 100 MB, so they cannot be" >&2
+    echo "pushed even with --force. Unstage them and commit again." >&2
+    exit 1
+fi

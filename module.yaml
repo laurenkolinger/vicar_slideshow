@@ -1,0 +1,48 @@
+# ==============================================================================
+# MODULE INTERFACE DEFINITION — VICAR Lab Showcase
+# ==============================================================================
+# A resource / viewer module (NOT a data-processing stage). It surfaces the
+# VICAR Lab slideshow + screensaver inside VICARIUS as a pop-out, and lets you
+# add media to the showcase from the UI. No data-dictionary outputs, no runner,
+# no CLI — rendering is driven by `ui.style: showcase` (see module_views.py).
+# ==============================================================================
+
+name: "vicar_slideshow"
+display_name: "VICAR Lab Showcase"           # short title on the UI card; REQUIRED
+tags: ["MISC"]                               # filter tag; this is a misc resource, not a pipeline
+hidden: false
+hidden_reason: ""
+version: "1.0.0"
+description: "VICAR Lab slideshow + screensaver. Pop out a full-screen showcase of lab imagery and video, or add new media to the reel from the UI."
+author: "Lauren Olinger"
+created: "2026-05-21"
+
+# Classification: viewer/resource, not a data pipeline stage.
+type: "resource"
+
+# No data inputs/outputs: this module does not produce dictionary-bound
+# datasets, so there is deliberately NO EML/sidecar contract here
+# (per the backlog item: "categorize as misc. no data dictionary").
+inputs: []
+outputs: []
+
+# ------------------------------------------------------------------------------
+# VICARIUS UI — showcase style
+# ------------------------------------------------------------------------------
+# `style: showcase` tells module_views.py to render templates/module_showcase.html
+# instead of the generic runner form. The page offers pop-out viewers (served by
+# Flask from this module's static bundle) plus an "add media" uploader that drops
+# files into the media folder and refreshes the manifest.
+ui:
+  style: showcase
+  bundle_dir: "slideshow"          # github_repo/<bundle_dir>/ holds the static showcase
+  media_dir: "slideshow_media"     # subfolder under bundle_dir that holds the slides
+  views:
+    - key: "screensaver"
+      label: "Open Screensaver"
+      file: "screensaver.html"
+      help: "Auto-advancing full-screen showcase (cursor hidden). Move the mouse or press Esc to exit."
+    - key: "slideshow"
+      label: "Open Slideshow"
+      file: "slideshow.html"
+      help: "Manual slideshow with a grid view. Space toggles grid/full-screen; arrow keys change slides."

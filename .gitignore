@@ -1,0 +1,17 @@
+# Heavy slideshow media (~980 MB of mp4/jpg/png, individual files up to 271 MB).
+# Distributed out-of-band, never committed -- GitHub rejects files over 100 MB.
+# The pre-commit hook (.githooks/) is the backstop against `git add -f`.
+slideshow/slideshow_media/
+
+# Generated thumbnails (regenerated from media on demand).
+slideshow/_thumbs/
+
+# Caches / envs / OS + editor cruft.
+env/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+.idea/
+.vscode/
+*.swp

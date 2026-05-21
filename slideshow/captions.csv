@@ -1,0 +1,20 @@
+title,caption,credit,chapter
+vicar-lab-intro,Robotics & AI in marine science research at the University of the Virgin Islands. The first robotics and AI lab in the U.S. Caribbean.,VICAR Lab,Intro
+grouper-spawning,"Ecologically important grouper species, including the critically endangered Nassau Grouper, gather in large groups to spawn south of St. Thomas.",VI-EPSCoR · Dan Mele,USVI Reefs
+salt-river-deep,Salt River Deep. A 30 m mesophotic reef on the steep canyon wall off the north shore of St. Croix. Once home to the famous underwater habitats HYDROLAB (1977-85) and Aquarius (1986-89).,VICAR Lab,USVI Reefs
+bleaching-event,The 2023/2024 mass bleaching event. A diver above a bleached Caribbean reef during the 4th Global Coral Bleaching Event.,VICAR Lab,USVI Reefs
+rangerbot-fish-study,"RangerBot, a compact reef-survey AUV from Queensland University of Technology with stereo vision and onboard target detection. Here UVI researchers use it to study fish. The robot is moving on its own. No one is driving.",VICAR Lab,Robots
+hydrus-deployment,"Hydrus, a compact 300 m photogrammetry AUV from Advanced Navigation, hand-launched at sea. Small AUVs go where divers and ships cannot. Paired with Subsonus USBL for AI-assisted photogrammetric surveys at mesophotic depths.",VICAR Lab,Robots
+dvl-integration,"Installing a Doppler Velocity Log on the BlueROV2, the lab's tethered workhorse for site inspections and shakedown dives. The DVL adds precision navigation in the absence of GPS. The unglamorous work behind autonomy.",VICAR Lab,Robots
+tcrmp-divers,"TCRMP. Territorial Coral Reef Monitoring Program. Divers ascending from surveys at Cane Bay Deep, Spring 2026. UVI researchers collect data and video on USVI reefs every year.",Photo · J. Quetel,Mapping
+reef-monitoring,UVI researchers also collect data and record video on USVI coral reefs every year. The long-term record that makes change detection possible.,VICAR Lab,Mapping
+tcrmp-orthos,Ortho-mosaics from diver imagery. 3D photogrammetric reconstructions of TCRMP reef sites at millimeter resolution. Each model is built from thousands of overlapping frames.,VICAR Lab,Mapping
+auv-dem-flythrough,"Georeferenced DEMs from AUVs. Digital elevation models of a Caribbean reef section, reconstructed from AUV imagery, covering ground a diver pair could not reach.",VICAR Lab,Mapping
+robots-and-divers,Robots will work alongside UVI technical divers to collect imagery for mapping. Together they expand what a single dive can cover.,VICAR Lab,Mapping
+bleaching-tracking,"3D map of a bleached coral reef using handheld cameras. Meri Shoal, Transect 2, November 2023. Repeat photogrammetry turns ""the reef bleached"" into per-colony trajectories of mortality, recovery, and replacement.",VICAR Lab,Mapping
+ai-from-robots,AI models help speed up identifications from imagery collected by robots.,VICAR Lab,AI
+fish-tracking,"Computer-vision models follow individual fish across underwater video. Hours of footage turn into structured data, and scientists are freed for analysis.",VICAR Lab,AI
+ai-corals,"AI models also help with the tedious work of identifying corals and other reef organisms. At scale, across the archive.",VICAR Lab,AI
+vicar-lab-team,"The VICAR Lab, Virgin Islands Center for Autonomous Research. The first robotics and AI lab in the U.S. Caribbean, home of the VICARIUS in-house vehicle program for mesophotic missions, with sensors and software developed alongside the science.",VICAR Lab,The Lab
+automation-conservation,"Automation, through robotics and AI, is helping us research and conserve USVI ecosystems.",VICAR Lab,The Lab
+VID_2_GlidersI,UVI’s ocean glider lab deploys large Slocum Gliders for extended missions.,,
