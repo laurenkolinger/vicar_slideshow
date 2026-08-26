@@ -12,7 +12,7 @@ display_name: "VICAR Lab Showcase"           # short title on the UI card; REQUI
 tags: ["MISC"]                               # filter tag; this is a misc resource, not a pipeline
 hidden: false
 hidden_reason: ""
-version: "1.0.0"
+version: "1.1.0"
 description: "VICAR Lab slideshow + screensaver. Pop out a full-screen showcase of lab imagery and video, or add new media to the reel from the UI."
 author: "Lauren Olinger"
 created: "2026-05-21"
@@ -41,7 +41,14 @@ ui:
     - key: "screensaver"
       label: "Open Screensaver"
       file: "screensaver.html"
-      help: "Auto-advancing full-screen showcase (cursor hidden). Move the mouse or press Esc to exit."
+      # detached: the view is served by its own http.server process on `port`,
+      # not by the VICARIUS Flask app, so a running screensaver survives
+      # VICARIUS restarts and can be stopped without touching the UI on 5090.
+      # The port matches slideshow/start-screensaver.command so the dock
+      # launcher and the UI reuse the same server when both are used.
+      detached: true
+      port: 8766
+      help: "Auto-advancing full-screen showcase (cursor hidden). Move the mouse or press Esc to exit. Runs on its own server (port 8766), so it keeps playing when VICARIUS quits or restarts."
     - key: "slideshow"
       label: "Open Slideshow"
       file: "slideshow.html"
