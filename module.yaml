@@ -1,10 +1,10 @@
 # ==============================================================================
-# MODULE INTERFACE DEFINITION — VICAR Lab Showcase
+# MODULE INTERFACE DEFINITION: VICAR Lab Showcase
 # ==============================================================================
 # A resource / viewer module (NOT a data-processing stage). It surfaces the
 # VICAR Lab slideshow + screensaver inside VICARIUS as a pop-out, and lets you
 # add media to the showcase from the UI. No data-dictionary outputs, no runner,
-# no CLI — rendering is driven by `ui.style: showcase` (see module_views.py).
+# no CLI. Rendering is driven by `ui.style: showcase` (see module_views.py).
 # ==============================================================================
 
 name: "vicar_slideshow"
@@ -27,7 +27,7 @@ inputs: []
 outputs: []
 
 # ------------------------------------------------------------------------------
-# VICARIUS UI — showcase style
+# VICARIUS UI: showcase style
 # ------------------------------------------------------------------------------
 # `style: showcase` tells module_views.py to render templates/module_showcase.html
 # instead of the generic runner form. The page offers pop-out viewers (served by
@@ -48,7 +48,7 @@ ui:
       # launcher and the UI reuse the same server when both are used.
       detached: true
       port: 8766
-      help: "Auto-advancing full-screen showcase (cursor hidden). Move the mouse or press Esc to exit. Runs on its own server (port 8766), so it keeps playing when VICARIUS quits or restarts."
+      help: "Auto-advancing full-screen showcase (cursor hidden). Move the mouse, click, or press any key to exit. Runs on its own server (port 8766), so it keeps playing when VICARIUS quits or restarts."
     - key: "slideshow"
       label: "Open Slideshow"
       file: "slideshow.html"
