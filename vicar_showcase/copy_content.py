@@ -345,7 +345,7 @@ def _copy_hashing(src: Path, partial: Path) -> str:
     return digest.hexdigest()
 
 
-def _supersede(dest: Path, name: str, stamp: str) -> None:
+def _supersede(dest: Path, name: str, stamp: str) -> bool:
     """Move an existing destination file to _superseded/<stamp>/ (never deleted).
 
     A file that has already vanished needs no moving.
@@ -354,6 +354,8 @@ def _supersede(dest: Path, name: str, stamp: str) -> None:
         dest: Destination folder.
         name: File name to move aside.
         stamp: Folder name, YYYYMMDD-HHMMSS.
+    Returns:
+        True when a file was moved aside, False when it had already vanished.
     Raises:
         OSError: The move failed.
     """
@@ -367,7 +369,8 @@ def _supersede(dest: Path, name: str, stamp: str) -> None:
         os.replace(dest / name, target)
     except FileNotFoundError:
         # Removed by someone else since planning: nothing to set aside.
-        return
+        return False
+    return True
 
 
 def _partial_path(dest: Path) -> Path:
@@ -394,10 +397,38 @@ def _publish_without_overwrite(partial: Path, final: Path) -> None:
         # Hard links are not supported here: use the exclusive-create guard below.
         pass
     try:
-        os.close(os.open(final, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
+        descriptor = os.open(final, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
     except FileExistsError as exc:
         raise PlacementConflict(f"{final.name} appeared in the destination during the copy") from exc
-    os.replace(partial, final)
+    try:
+        placeholder = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        os.replace(partial, final)
+    except OSError:
+        _remove_placeholder(final, placeholder)
+        raise
+
+
+def _remove_placeholder(final: Path, placeholder: os.stat_result) -> None:
+    """Remove the empty file this run created as a name guard, when it is still that file.
+
+    A 0-byte leftover would later read as a conflict and as "still syncing".
+
+    Parameters:
+        final: The guard file's path.
+        placeholder: The os.stat result taken when the guard file was created.
+    """
+    try:
+        current = final.lstat()
+        if current.st_ino == placeholder.st_ino and current.st_dev == placeholder.st_dev and current.st_size == 0:
+            final.unlink()
+    except FileNotFoundError:
+        # Already gone: nothing to clean.
+        pass
+    except OSError as exc:
+        _LOGGER.warning("could not remove the empty placeholder %s: %s", final, exc)
 
 
 def _remove_partial(partial: Path) -> None:
@@ -419,7 +450,7 @@ def _place_one(item: PlanItem, plan: CopyPlan, stamp: str) -> tuple[str, str]:
         plan: The plan (destination, replace flag).
         stamp: Folder name for superseded files.
     Returns:
-        (action, sha256) where action is copied or replaced.
+        (action, sha256) where action is replaced only when an old file was moved aside, otherwise copied.
     Raises:
         PlacementConflict: The final name exists now (it appeared after planning).
         OSError: A file operation failed.
@@ -433,8 +464,8 @@ def _place_one(item: PlanItem, plan: CopyPlan, stamp: str) -> tuple[str, str]:
             raise ValueError(f"verification failed: {item.name} was not written correctly")
         action = ACTION_COPIED
         if item.status == "conflict":
-            _supersede(plan.dest_dir, item.name, stamp)
-            action = ACTION_REPLACED
+            if _supersede(plan.dest_dir, item.name, stamp):
+                action = ACTION_REPLACED
         _publish_without_overwrite(partial, final)
         return action, digest
     finally:

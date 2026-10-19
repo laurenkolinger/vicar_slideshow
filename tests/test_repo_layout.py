@@ -89,6 +89,13 @@ class LayoutTests(unittest.TestCase):
         self.assertIsNone(EMOJI.search(text), "README has an emoji")
         self.assertIsNone(re.search(r"(?i)\bland(s|ed|ing)?\b", text), "README uses the banned word")
 
+    def test_readme_command_table_matches_the_server_behaviour(self):
+        text = README.read_text(encoding="utf-8")
+        self.assertIn("[--port <port>]", next(l for l in text.splitlines() if l.startswith("| `serve ")),
+                      "serve's --port is optional")
+        self.assertIn("does not name this machine", text)
+        self.assertIn("answers 403", text)
+
     def test_other_text_files_follow_the_prose_rules(self):
         paths = [REPO / "module.yaml", *sorted((REPO / ".githooks").iterdir())]
         for path in paths:

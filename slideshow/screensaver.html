@@ -335,8 +335,10 @@ function buildCard(slide) {
 
   const cap = document.createElement('div');
   cap.className = 'cap';
-  const metaBits = ['<span class="rule"></span>'];
+  const metaBits = [];
   const hasNumber = typeof slide.number === 'string' && slide.number !== '';
+  // The magenta rule introduces the number and chapter; with neither it would be a lone line.
+  if (hasNumber || slide.chapter) metaBits.push('<span class="rule"></span>');
   if (hasNumber) metaBits.push(`<span class="num">${escapeHtml(slide.number)}</span>`);
   if (slide.chapter) {
     if (hasNumber) metaBits.push('<span class="sep">/</span>');
@@ -344,7 +346,7 @@ function buildCard(slide) {
   }
   const text = slide.caption || readableTitle(slide.title);
   cap.innerHTML = `
-    <div class="cap-meta">${metaBits.join('')}</div>
+    ${metaBits.length ? `<div class="cap-meta">${metaBits.join('')}</div>` : ''}
     <div class="cap-text">${escapeHtml(text)}</div>
     ${slide.credit ? `<div class="cap-credit">${escapeHtml(slide.credit)}</div>` : ''}
   `;
@@ -423,10 +425,10 @@ function tickClock() {
 }
 
 // ============================================================
-// Exit on any user input: but only after a grace period, and the
-// first mouse position post-grace is taken as a baseline so a static
-// cursor doesn't auto-quit. Movement past EXIT_MOUSE_THRESHOLD_PX,
-// any click, or any key all trigger exit.
+// Exit on any user input, but only after a grace period. The first
+// mouse position after the grace period is taken as a baseline so a
+// static cursor does not quit the saver. Movement past
+// EXIT_MOUSE_THRESHOLD_PX, any click, or any key triggers the exit.
 // ============================================================
 let exitArmed = false;
 let mouseBaseline = null;

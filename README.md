@@ -152,7 +152,7 @@ Run every command from the repository's top folder as `python3 showcase.py <comm
 |---|---|
 | `screensaver [--port <port>]` | Starts the screensaver server on port 8766 (or reuses the one already running) and opens the page full screen in Chrome, Chromium or, on Windows, Edge. Closing that window stops a server this command started. With no such browser it tries Firefox in kiosk mode, then the default browser; the default browser cannot be watched, so then press Ctrl+C in the terminal to stop. |
 | `slideshow [--port <port>]` | Starts the slideshow server on port 8765 (or reuses the one already running) and opens the page in the default browser. Ctrl+C stops a server this command started. |
-| `serve --view <screensaver\|slideshow> --port <port>` | Runs one view's server in the foreground without opening a browser. VICARIUS starts views this way. |
+| `serve --view <screensaver\|slideshow> [--port <port>]` | Runs one view's server in the foreground without opening a browser, on the view's own port unless `--port` is given. VICARIUS starts views this way. |
 | `check [--json]` | Reads the content folder and prints the slides, skipped files and warnings. `--json` prints the report for programs. |
 | `copy-content --from <folder> [--to <folder>] [--captions <file>] [--replace] [--dry-run]` | Copies slides and captions into the content folder, as described above |
 | `make-thumbs` | Makes preview pictures for videos with `ffmpeg`, in `.cache/thumbs/` |
@@ -175,7 +175,7 @@ When a view's port is already in use, the launcher asks the program on it. If it
 
 ## How it works inside
 
-The tool is the Python package `vicar_showcase/` plus the entry script `showcase.py`. It serves the two pages in `slideshow/` on 127.0.0.1 only. Each request to `/_manifest.json` rescans the content folder, so a file you add shows up on the next page load, with no manifest file written to disk. Media is served from the content folder with range requests, so videos seek. Anything outside the folder, and any directory listing, answers 404.
+The tool is the Python package `vicar_showcase/` plus the entry script `showcase.py`. It serves the two pages in `slideshow/` on 127.0.0.1 only. Each request to `/_manifest.json` rescans the content folder, so a file you add shows up on the next page load, with no manifest file written to disk. Media is served from the content folder with range requests, so videos seek. Anything outside the folder, and any directory listing, answers 404. A request whose Host header does not name this machine (127.0.0.1 or localhost) answers 403.
 
 Preview pictures for videos are cached in `.cache/thumbs/` (git ignores it) and keyed by the video's path, size and modification time.
 

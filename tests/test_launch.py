@@ -19,7 +19,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.helpers import LiveServerTestCase, TempDirTestCase, free_port, make_content, make_repo
+from tests.helpers import (LaunchGuardMixin, LiveServerTestCase, StrictRunner, TempDirTestCase, free_port,
+                           make_content, make_repo)
 from vicar_showcase import launch
 from vicar_showcase.launch import LaunchError, Runner
 from vicar_showcase.settings import Settings
@@ -51,8 +52,8 @@ class FakeChild:
         return self.returncode
 
 
-class FakeRunner(Runner):
-    """Records every outside effect and answers from tables."""
+class FakeRunner(StrictRunner):
+    """Records every outside effect and answers from tables (never the real Runner)."""
 
     def __init__(self, programs=(), files=(), child=None, gsettings=None, windows=""):
         self.programs = set(programs)
@@ -112,7 +113,7 @@ def settings_for(repo: Path, content: Path, source="settings.json") -> Settings:
     return Settings(repo, content, source, "captions.csv")
 
 
-class DetectTests(unittest.TestCase):
+class DetectTests(LaunchGuardMixin, unittest.TestCase):
     """detect_browser and command builders."""
 
     def test_linux_order(self):
@@ -170,7 +171,7 @@ class DetectTests(unittest.TestCase):
             self.assertNotIn("--content", launch.server_command(settings_for(Path("/r"), Path("/c"), source), "slideshow", 1))
 
 
-class ProbeTests(LiveServerTestCase):
+class ProbeTests(LaunchGuardMixin, LiveServerTestCase):
     """probe_existing and port_in_use."""
 
     def test_probe_live_server(self):
@@ -203,7 +204,7 @@ class ProbeTests(LiveServerTestCase):
         self.assertLess(time.time() - start, 3)
 
 
-class EnsureServerTests(TempDirTestCase):
+class EnsureServerTests(LaunchGuardMixin, TempDirTestCase):
     """ensure_server."""
 
     def setUp(self):
@@ -245,6 +246,22 @@ class EnsureServerTests(TempDirTestCase):
         self.assertEqual(argv[1:], [str(self.settings.repo_dir / "showcase.py"), "serve", "--view", "slideshow", "--port", "8765"])
         self.assertEqual(kwargs["cwd"], str(self.settings.repo_dir))
 
+    def test_start_failure_hint_carries_the_content_folder_when_it_was_chosen_by_flag(self):
+        flagged = settings_for(self.tmp / "repo", self.content, "--content flag")
+        for settings, wants in ((flagged, True), (self.settings, False)):
+            runner = FakeRunner(child=FakeChild(exit_code=1))
+            with self.assertRaises(LaunchError) as ctx:
+                launch.ensure_server(settings, "screensaver", 8766, runner, lambda p: None, lambda p: False)
+            self.assertEqual(f"--content {self.content}" in str(ctx.exception), wants, str(ctx.exception))
+
+    def test_start_failure_hint_quotes_a_folder_with_spaces(self):
+        spaced = self.tmp / "my slides"; spaced.mkdir()
+        runner = FakeRunner(child=FakeChild(exit_code=1))
+        with self.assertRaises(LaunchError) as ctx:
+            launch.ensure_server(settings_for(self.tmp / "repo", spaced, "--content flag"), "slideshow", 8765,
+                                 runner, lambda p: None, lambda p: False)
+        self.assertIn(f"--content '{spaced}'", str(ctx.exception))
+
     def test_start_failure_hint_names_the_view_and_port(self):
         runner = FakeRunner(child=FakeChild(exit_code=1))
         with self.assertRaises(LaunchError) as ctx:
@@ -271,7 +288,7 @@ class EnsureServerTests(TempDirTestCase):
         launch.stop_child(None)
 
 
-class DockAndHelperTests(unittest.TestCase):
+class DockAndHelperTests(LaunchGuardMixin, unittest.TestCase):
     """Dock toggle and fullscreen helper."""
 
     def test_dock_toggled_and_restored(self):
@@ -322,7 +339,7 @@ class DockAndHelperTests(unittest.TestCase):
         self.assertEqual(len(runner.calls), n)
 
 
-class RunViewTests(TempDirTestCase):
+class RunViewTests(LaunchGuardMixin, TempDirTestCase):
     """run_view sessions."""
 
     def setUp(self):
@@ -363,7 +380,8 @@ class RunViewTests(TempDirTestCase):
 
         runner = RealBrowserRunner(files=[missing])
         err = io.StringIO()
-        with mock.patch.object(launch, "MAC_CHROME_PATHS", (missing,)), contextlib.redirect_stderr(err):
+        with mock.patch.object(launch, "MAC_CHROME_PATHS", (missing,)), contextlib.redirect_stderr(err), \
+                contextlib.redirect_stdout(io.StringIO()):
             code = launch.run_view(self.settings, "screensaver", 8766, runner, "darwin",
                                    lambda p: next(probes, {"app": "vicar-showcase"}), lambda p: False)
         self.assertEqual(code, 1)
@@ -390,8 +408,65 @@ class RunViewTests(TempDirTestCase):
         sets = [c for c in runner.named("gsettings") if c[1] == "set"]
         self.assertEqual([c[-1] for c in sets], ["false", "true"])
 
+    def default_signals(self):
+        """Run the test with SIGHUP and SIGTERM at their defaults, whatever started the test run."""
+        saved = {n: signal.getsignal(n) for n in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)}
+        self.addCleanup(lambda: [signal.signal(n, h) for n, h in saved.items()])
+        signal.signal(signal.SIGHUP, signal.SIG_DFL)
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
+    @unittest.skipUnless(hasattr(signal, "SIGHUP"), "SIGHUP exists on POSIX only")
+    def test_a_second_hangup_during_cleanup_does_not_skip_stopping_the_server(self):
+        """Closing a terminal can send SIGHUP twice in quick succession."""
+        self.default_signals()
+        probes = iter([None, {"app": "vicar-showcase"}])
+        runner = FakeRunner(["google-chrome", "gsettings"])
+        original = signal.getsignal(signal.SIGHUP)
+        original_int = signal.getsignal(signal.SIGINT)
+        fake_run = runner.run
+
+        def hang_up_once(args):
+            os.kill(os.getpid(), signal.SIGHUP)
+            time.sleep(0.05)  # let the handler run in this (main) thread
+
+        def second_hang_up_during_restore(args, timeout=None):
+            result = fake_run(args, timeout)
+            if args[:2] == ["gsettings", "set"] and args[-1] == "true":
+                os.kill(os.getpid(), signal.SIGHUP)
+                os.kill(os.getpid(), signal.SIGTERM)
+                os.kill(os.getpid(), signal.SIGINT)
+                time.sleep(0.05)
+            return result
+
+        runner.run_foreground = hang_up_once
+        runner.run = second_hang_up_during_restore
+        with self.assertRaises(SystemExit) as ctx:
+            self.run_view("screensaver", runner, probe=lambda p: next(probes, {"app": "vicar-showcase"}))
+        self.assertEqual(ctx.exception.code, 128 + signal.SIGHUP)
+        self.assertTrue(runner.child.terminated, "the server child is stopped even after more signals")
+        sets = [c for c in runner.named("gsettings") if c[1] == "set"]
+        self.assertEqual([c[-1] for c in sets], ["false", "true"])
+        self.assertEqual(signal.getsignal(signal.SIGHUP), original, "the old handler is put back")
+        self.assertEqual(signal.getsignal(signal.SIGINT), original_int)
+
+    @unittest.skipUnless(hasattr(signal, "SIGHUP"), "SIGHUP exists on POSIX only")
+    def test_an_inherited_ignore_is_kept(self):
+        """Under nohup SIGHUP is ignored on purpose; the launcher must not replace that."""
+        self.default_signals()
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        previous = launch._exit_on_termination()
+        try:
+            self.assertEqual(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
+            self.assertNotIn(signal.getsignal(signal.SIGTERM), (signal.SIG_DFL, signal.SIG_IGN),
+                             "SIGTERM, which was not ignored, still gets the handler")
+        finally:
+            launch._restore_termination(previous)
+        self.assertEqual(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
+        self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_DFL)
+
     @unittest.skipUnless(hasattr(signal, "SIGHUP"), "SIGHUP exists on POSIX only")
     def test_closing_the_terminal_stops_the_server_and_restores_the_dock(self):
+        self.default_signals()
         probes = iter([None, {"app": "vicar-showcase"}])
         runner = FakeRunner(["google-chrome", "gsettings"])
         original = signal.getsignal(signal.SIGHUP)
@@ -435,10 +510,38 @@ class RunViewTests(TempDirTestCase):
         self.assertEqual(runner.popens, [])
         self.assertFalse(runner.child.terminated)
 
-    def test_firefox_fallback(self):
+    def test_firefox_fallback_is_its_own_instance_with_its_own_profile(self):
         runner = FakeRunner(["firefox"])
-        self.run_view("screensaver", runner)
-        self.assertEqual(runner.named("firefox")[0][:2], ["firefox", "--kiosk"])
+        self.assertEqual(self.run_view("screensaver", runner), 0)
+        profile = self.tmp / "home" / ".cache" / "vicar-screensaver-firefox-profile"
+        self.assertEqual(runner.named("firefox")[0],
+                         ["firefox", "--new-instance", "--profile", str(profile), "--kiosk",
+                          "http://127.0.0.1:8766/screensaver.html"])
+        self.assertTrue(profile.is_dir(), "the profile folder is created on demand")
+
+    def test_browser_that_exits_with_an_error_is_reported_and_cleaned_up(self):
+        for programs, expected in ((["google-chrome"], "google-chrome"), (["firefox"], "firefox"),
+                                   (["xdg-open"], "xdg-open")):
+            with self.subTest(expected=expected):
+                runner = FakeRunner(programs, child=FakeChild(wait_raises=KeyboardInterrupt()))
+                runner.run_foreground = lambda args, runner=runner: (
+                    runner.calls.append(list(args)) or subprocess.CompletedProcess(args, 3))
+                probes = iter([None, {"app": "vicar-showcase"}])
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                    code = launch.run_view(self.settings, "screensaver", 8766, runner, "linux",
+                                           lambda p: next(probes, {"app": "vicar-showcase"}), lambda p: False)
+                self.assertEqual(code, 1)
+                self.assertIn(f"{expected} exited with an error (code 3)", err.getvalue())
+                self.assertTrue(runner.child.terminated)
+
+    def test_xdg_open_success_keeps_serving_and_says_so(self):
+        out = io.StringIO()
+        runner = FakeRunner(["xdg-open"], child=FakeChild(wait_raises=KeyboardInterrupt()))
+        with contextlib.redirect_stdout(out):
+            launch._open_default("http://x/", runner, "linux", runner.child, prefer_xdg=True)
+        self.assertIn("returns at once, so the server keeps running", out.getvalue())
+        self.assertIn("Press Ctrl+C", out.getvalue())
 
     def test_xdg_open_fallback_waits(self):
         runner = FakeRunner(["xdg-open"], child=FakeChild(wait_raises=KeyboardInterrupt()))
@@ -471,22 +574,113 @@ class RunViewTests(TempDirTestCase):
         self.assertEqual(runner.named("gsettings"), [])
 
 
-class RealRunnerTests(TempDirTestCase):
+class TempFolderCleanupTests(unittest.TestCase):
+    """The shared temporary folder never outlives its test, even when the test fails."""
+
+    def test_folder_is_removed_after_pass_fail_and_error(self):
+        made = []
+
+        class Probe(TempDirTestCase):
+            def test_pass(self):
+                made.append(self.tmp); (self.tmp / "content").mkdir()
+            def test_fail(self):
+                made.append(self.tmp); (self.tmp / "content").mkdir(); self.fail("on purpose")
+            def test_error(self):
+                made.append(self.tmp); (self.tmp / "content").mkdir(); raise RuntimeError("on purpose")
+
+        result = unittest.TestResult()
+        unittest.defaultTestLoader.loadTestsFromTestCase(Probe).run(result)
+        self.assertEqual((result.testsRun, len(result.failures), len(result.errors)), (3, 1, 1))
+        self.assertEqual(len(made), 3)
+        self.assertEqual([p for p in made if p.exists()], [])
+
+
+class BrowserGuardTests(LaunchGuardMixin, TempDirTestCase):
+    """The guard itself: an unstubbed browser start fails the test and starts nothing."""
+
+    class BrowserFoundRunner(Runner):
+        """The REAL runner except that a Chrome and Firefox are reported as installed, so the
+        launcher goes all the way to starting one. Only safe under the guard."""
+
+        def which(self, name):
+            return None if name in ("gsettings", "wmctrl") else f"/usr/bin/{name}"
+
+        def sleep(self, seconds):
+            pass
+
+    def setUp(self):
+        super().setUp()
+        self.content = self.tmp / "content"; self.content.mkdir()
+        self.settings = settings_for(self.tmp / "repo", self.content)
+        home = mock.patch.object(launch.Path, "home", return_value=self.tmp / "home")
+        home.start()
+        self.addCleanup(home.stop)
+
+    def test_kiosk_browser_start_through_the_real_runner_is_blocked(self):
+        info = {"app": "vicar-showcase", "content_dir": str(self.content)}
+        with mock.patch("builtins.print"), self.assertRaises(AssertionError) as ctx:
+            launch.run_view(self.settings, "screensaver", 8766, self.BrowserFoundRunner(), "linux",
+                            lambda p: info, lambda p: False)
+        self.assertIn("subprocess.run", str(ctx.exception))
+        self.assertIn("google-chrome", str(ctx.exception))
+        self.assertEqual(self.guard.started, [], "no process was started")
+        self.assertEqual(len(self.guard.blocked), 1)
+
+    def test_firefox_start_is_blocked(self):
+        runner = self.BrowserFoundRunner()
+        runner.which = lambda name: "/usr/bin/firefox" if name == "firefox" else None
+        info = {"app": "vicar-showcase", "content_dir": str(self.content)}
+        with mock.patch("builtins.print"), self.assertRaises(AssertionError):
+            launch.run_view(self.settings, "screensaver", 8766, runner, "linux", lambda p: info, lambda p: False)
+        self.assertEqual(self.guard.started, [])
+
+    def test_default_browser_opener_is_blocked(self):
+        info = {"app": "vicar-showcase", "content_dir": str(self.content)}
+        with mock.patch("builtins.print"), self.assertRaises(AssertionError) as ctx:
+            launch.run_view(self.settings, "slideshow", 8766, self.BrowserFoundRunner(), "linux",
+                            lambda p: info, lambda p: False)
+        self.assertIn("webbrowser.open", str(ctx.exception))
+        self.assertEqual(self.guard.started, [])
+
+    def test_a_program_that_is_not_allowed_never_starts(self):
+        for call in (lambda: subprocess.Popen(["/bin/true"]), lambda: subprocess.run(["xdg-open", "http://x/"]),
+                     lambda: os.system("true")):
+            with self.assertRaises(AssertionError):
+                call()
+        self.assertEqual(self.guard.started, [])
+
+    def test_the_strict_runner_fails_every_method_that_is_not_overridden(self):
+        strict = StrictRunner()
+        for call in (lambda: strict.which("x"), lambda: strict.exists("x"), lambda: strict.run(["x"]),
+                     lambda: strict.run_foreground(["x"]), lambda: strict.popen(["x"]),
+                     lambda: strict.open_url("x"), lambda: strict.sleep(1)):
+            with self.assertRaises(AssertionError):
+                call()
+        self.assertNotIn(Runner, FakeRunner.__mro__, "the fake must never inherit the real runner")
+
+
+class RealRunnerTests(LaunchGuardMixin, TempDirTestCase):
     """The real Runner's browser method (run only against this Python, never a browser)."""
+
+    allowed_programs = (sys.executable,)
 
     def test_foreground_discards_output_and_returns_the_result(self):
         result = Runner().run_foreground([sys.executable, "-c", "print('x' * 100000); import sys; sys.exit(3)"])
         self.assertEqual(result.returncode, 3)
         self.assertIsNone(result.stdout)
         self.assertIsNone(result.stderr)
+        self.assertTrue(self.guard.started and all("'" + sys.executable + "'" in c for c in self.guard.started),
+                        self.guard.started)
 
     def test_foreground_raises_oserror_for_a_missing_program(self):
         with self.assertRaises(OSError):
             Runner().run_foreground([str(self.tmp / "no-such-browser")])
 
 
-class RealChildTests(TempDirTestCase):
+class RealChildTests(LaunchGuardMixin, TempDirTestCase):
     """Start the real server as a child process through ensure_server."""
+
+    allowed_programs = (sys.executable,)
 
     def test_child_argv_and_stop(self):
         content = self.tmp / "content"; content.mkdir()
@@ -503,6 +697,8 @@ class RealChildTests(TempDirTestCase):
             argv = Path(f"/proc/{child.pid}/cmdline").read_bytes().split(b"\0")[:-1]
             self.assertEqual([a.decode() for a in argv],
                              [sys.executable, str(repo / "showcase.py"), "serve", "--view", "slideshow", "--port", str(port)])
+        self.assertTrue(self.guard.started and all("'" + sys.executable + "'" in c for c in self.guard.started),
+                        self.guard.started)
         again = launch.ensure_server(settings, "slideshow", port, Runner())
         self.assertIsNone(again, "a second launcher reuses the running server")
         launch.stop_child(child)

@@ -112,7 +112,7 @@
   }
 
   /* ============================================================ */
-  /* Top caption bar, solid black                              */
+  /* Top caption bar with a solid black background */
   /* ============================================================ */
   #cap {
     position: fixed; top: 0; left: 0; right: 0; z-index: 50;
@@ -615,7 +615,7 @@ function startSlideshow() {
 function renderGrid() {
   const root = $('grid-root');
   root.innerHTML = '';
-  $('grid-count').textContent = `${state.slides.length} slides`;
+  $('grid-count').textContent = `${state.slides.length} ${state.slides.length === 1 ? 'slide' : 'slides'}`;
 
   // group by chapter (preserve first-seen order)
   const order = []; const groups = {};

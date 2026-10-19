@@ -112,6 +112,50 @@ class CopyTests(TempDirTestCase):
         self.assertRegex(moved[0].parent.name, r"^\d{8}-\d{6}$")
         self.assertEqual(len([r for r in self.rows() if r["action"] == "replaced"]), 1)
 
+    def test_replace_of_a_file_that_vanished_is_logged_as_copied(self):
+        (self.dst / "02-beta.png").write_bytes(b"different")
+        plan = plan_copy(self.src, self.dst, replace=True)
+        (self.dst / "02-beta.png").unlink()  # removed by someone else after planning
+        result = execute_plan(plan, run_by="tester", out=lambda s: None)
+        self.assertEqual((result.replaced, result.copied, result.failed), (0, 4, 0))
+        actions = {r["file"]: r["action"] for r in self.rows()}
+        self.assertEqual(actions["02-beta.png"], "copied")
+        self.assertEqual(list((self.dst / "_superseded").glob("*/*")), [])
+        self.assertEqual(sha(self.dst / "02-beta.png"), sha(self.src / "02-beta.png"))
+
+    def test_failed_rename_without_hard_links_removes_the_empty_placeholder(self):
+        plan = plan_copy(self.src, self.dst)
+        real_replace = os.replace
+
+        def refuse_final(src, dst):
+            if Path(dst).name == "01_alpha.png":
+                raise OSError(errno.EIO, "disk error")
+            return real_replace(src, dst)
+
+        with mock.patch.object(cc.os, "link", side_effect=OSError(errno.ENOTSUP, "no hard links")), \
+                mock.patch.object(cc.os, "replace", side_effect=refuse_final):
+            result = execute_plan(plan, run_by="tester", out=lambda s: None)
+        self.assertEqual(result.failed, 1)
+        self.assertFalse((self.dst / "01_alpha.png").exists(), "no 0-byte placeholder is left behind")
+        self.assertEqual([n for n in os.listdir(self.dst) if n.endswith(".partial")], [])
+        self.assertEqual(sha(self.dst / "02-beta.png"), sha(self.src / "02-beta.png"))
+
+    def test_a_file_that_replaced_the_placeholder_is_not_removed(self):
+        final = self.dst / "01_alpha.png"
+        partial = self.dst / "x.partial"
+        partial.write_bytes(b"data")
+
+        def someone_else_wins(src, dst):
+            Path(dst).unlink()
+            Path(dst).write_bytes(b"theirs")
+            raise OSError(errno.EIO, "disk error")
+
+        with mock.patch.object(cc.os, "link", side_effect=OSError(errno.ENOTSUP, "no hard links")), \
+                mock.patch.object(cc.os, "replace", side_effect=someone_else_wins):
+            with self.assertRaises(OSError):
+                cc._publish_without_overwrite(partial, final)
+        self.assertEqual(final.read_bytes(), b"theirs")
+
     def test_dest_must_exist_and_is_not_created(self):
         with self.assertRaises(CopyError) as ctx:
             plan_copy(self.src, self.tmp / "nowhere")

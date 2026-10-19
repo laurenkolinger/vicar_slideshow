@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import shlex
 import shutil
 import socket
 import subprocess
@@ -37,6 +38,7 @@ WINDOW_POLL_SECONDS = 0.25
 DOCK_SCHEMA = "org.gnome.shell.extensions.dash-to-dock"
 DOCK_KEY = "dock-fixed"
 PROFILE_SUBDIR = Path(".cache") / "vicar-screensaver-profile"
+FIREFOX_PROFILE_SUBDIR = Path(".cache") / "vicar-screensaver-firefox-profile"
 LINUX_CHROME_NAMES = ("google-chrome", "chromium", "chromium-browser")
 MAC_CHROME_PATHS = (
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -180,6 +182,21 @@ def chrome_kiosk_command(browser: str, url: str, profile_dir: Path) -> list[str]
     return [browser, f"--user-data-dir={profile_dir}", f"--app={url}", *CHROME_KIOSK_FLAGS]
 
 
+def firefox_kiosk_command(url: str, profile_dir: Path) -> list[str]:
+    """Build the kiosk Firefox command.
+
+    --new-instance with its own profile makes the process stay until the window closes;
+    without them Firefox hands the page to a window that is already open and exits at once.
+
+    Parameters:
+        url: The page to open.
+        profile_dir: Dedicated profile folder.
+    Returns:
+        The argument list.
+    """
+    return ["firefox", "--new-instance", "--profile", str(profile_dir), "--kiosk", url]
+
+
 def server_command(settings: Settings, view: str, port: int) -> list[str]:
     """Build the argv of the server child (VICARIUS looks for exactly this shape).
 
@@ -196,6 +213,21 @@ def server_command(settings: Settings, view: str, port: int) -> list[str]:
     if settings.content_dir_source in (SOURCE_FLAG, SOURCE_ENV):
         argv += ["--content", str(settings.content_dir)]
     return argv
+
+
+def server_hint(settings: Settings, view: str, port: int) -> str:
+    """Return the command a person can run in the repository folder to see why the server fails.
+
+    Built from server_command, so it carries --content whenever the launcher was given one.
+
+    Parameters:
+        settings: Resolved settings.
+        view: screensaver or slideshow.
+        port: TCP port.
+    Returns:
+        A shell-quoted command line starting with python3 showcase.py.
+    """
+    return shlex.join(["python3", "showcase.py", *server_command(settings, view, port)[2:]])
 
 
 class DockToggle:
@@ -296,7 +328,7 @@ def ensure_server(settings: Settings, view: str, port: int, runner: Runner,
     if not sys.platform.startswith("win"):
         kwargs["start_new_session"] = True
     child = runner.popen(server_command(settings, view, port), **kwargs)
-    _wait_for_server(child, view, port, runner, probe)
+    _wait_for_server(child, server_hint(settings, view, port), port, runner, probe)
     return child
 
 
@@ -307,13 +339,13 @@ def _same_folder(reported: object, wanted: Path) -> bool:
     return os.path.realpath(reported) == os.path.realpath(wanted)
 
 
-def _wait_for_server(child: subprocess.Popen, view: str, port: int, runner: Runner,
+def _wait_for_server(child: subprocess.Popen, hint: str, port: int, runner: Runner,
                      probe: Callable[[int], Optional[dict]]) -> None:
     """Wait until the child's port answers.
 
     Parameters:
         child: The server process.
-        view: screensaver or slideshow (named in the hint).
+        hint: The command that shows why the server fails (from server_hint).
         port: TCP port.
         runner: Provides sleep().
         probe: Reads /_showcase_info.json.
@@ -324,7 +356,7 @@ def _wait_for_server(child: subprocess.Popen, view: str, port: int, runner: Runn
     while waited <= SERVER_WAIT_SECONDS:
         if child.poll() is not None:
             raise LaunchError(f"the showcase server stopped at start (exit code {child.returncode}); "
-                              f"run `python3 showcase.py serve --view {view} --port {port}` to see why")
+                              f"run `{hint}` to see why")
         info = probe(port)
         if info is not None and info.get("app") == APP_NAME:
             return
@@ -365,7 +397,9 @@ def _open_screensaver(url: str, runner: Runner, platform: str, child: Optional[s
         profile.mkdir(parents=True, exist_ok=True)
         _run_browser(runner, chrome_kiosk_command(browser, url, profile))
     elif runner.which("firefox"):
-        _run_browser(runner, ["firefox", "--kiosk", url])
+        profile = Path.home() / FIREFOX_PROFILE_SUBDIR
+        profile.mkdir(parents=True, exist_ok=True)
+        _run_browser(runner, firefox_kiosk_command(url, profile))
     else:
         _open_default(url, runner, platform, child, prefer_xdg=True)
 
@@ -377,13 +411,17 @@ def _run_browser(runner: Runner, command: Sequence[str]) -> None:
         runner: Starts the program.
         command: The browser command line.
     Raises:
-        LaunchError: The browser could not be started; the message says why.
+        LaunchError: The browser could not be started, or it exited with an error; the
+            message says which.
     """
     try:
-        runner.run_foreground(command)
+        result = runner.run_foreground(command)
     except OSError as exc:
         raise LaunchError(f"the browser {command[0]} could not be started ({exc.strerror or exc}); "
                           f"open the page yourself, or install Chrome or Chromium") from exc
+    if result.returncode != 0:
+        raise LaunchError(f"the browser {command[0]} exited with an error (code {result.returncode}); "
+                          f"the page may not have been shown. Open it yourself, or install Chrome or Chromium")
 
 
 def _open_default(url: str, runner: Runner, platform: str, child: Optional[subprocess.Popen],
@@ -400,6 +438,7 @@ def _open_default(url: str, runner: Runner, platform: str, child: Optional[subpr
     """
     if prefer_xdg and platform.startswith("linux") and runner.which("xdg-open"):
         _run_browser(runner, ["xdg-open", url])
+        print("xdg-open hands the page to your browser and returns at once, so the server keeps running.")
     elif not runner.open_url(url):
         print(f"showcase: no browser was found; open {url} yourself.")
     if child is None:
@@ -422,29 +461,56 @@ def _wait_until_interrupted(child: Optional[subprocess.Popen], runner: Runner) -
 
 
 def _termination_signals() -> list[int]:
-    """Return the signals that end a session: SIGTERM, and SIGHUP where it exists (closing the terminal)."""
+    """Return the signals that end a session by request: SIGTERM, and SIGHUP where it exists (closing the terminal)."""
     names = ("SIGTERM", "SIGHUP")
     return [getattr(signal, name) for name in names if hasattr(signal, name)]
+
+
+def _session_signals() -> list[int]:
+    """Return every signal that could cut the cleanup short: the termination signals and Ctrl+C."""
+    return _termination_signals() + [signal.SIGINT]
+
+
+def _ignore_session_signals() -> None:
+    """Ignore SIGTERM, SIGHUP and SIGINT so a second signal cannot interrupt the cleanup.
+
+    Closing a terminal often sends SIGHUP more than once; without this the second one would
+    stop the dock restore and leave the server child running in its own session.
+    """
+    for number in _session_signals():
+        try:
+            signal.signal(number, signal.SIG_IGN)
+        except ValueError:
+            # Not the main thread (a test harness): the handling stays as it is.
+            continue
 
 
 def _exit_on_termination() -> dict:
     """Turn SIGTERM and SIGHUP into a normal exit so the cleanup (dock, server child) still runs.
 
     Closing the terminal sends SIGHUP; without this the server child (its own session)
-    would keep running and the dock setting would stay changed.
+    would keep running and the dock setting would stay changed. A signal that was already
+    ignored when the launcher started (nohup ignores SIGHUP on purpose) stays ignored.
 
     Returns:
         The previous handlers by signal number (for _restore_termination); empty when
-        they could not be changed.
+        they could not be read.
     """
     def handler(signum, frame):  # noqa: ARG001
-        """Raise SystemExit so the finally blocks run."""
+        """Ignore further signals first, then raise SystemExit so the finally blocks run."""
+        _ignore_session_signals()
         raise SystemExit(128 + signum)
 
     previous = {}
+    for number in _session_signals():
+        current = signal.getsignal(number)
+        if current is not None:
+            previous[number] = current
     for number in _termination_signals():
+        if previous.get(number) == signal.SIG_IGN:
+            continue
         try:
-            previous[number] = signal.signal(number, handler)
+            signal.signal(number, handler)
         except ValueError:
             # Not the main thread (a test harness): the default handling stays.
             continue
@@ -452,9 +518,13 @@ def _exit_on_termination() -> dict:
 
 
 def _restore_termination(previous: dict) -> None:
-    """Put back the handlers that _exit_on_termination replaced."""
+    """Put back the handlers that were in place before _exit_on_termination."""
     for number, handler in previous.items():
-        signal.signal(number, handler)
+        try:
+            signal.signal(number, handler)
+        except ValueError:
+            # Not the main thread: nothing was changed, so nothing to put back.
+            continue
 
 
 def run_view(settings: Settings, view: str, port: int, runner: Optional[Runner] = None,
@@ -500,6 +570,7 @@ def run_view(settings: Settings, view: str, port: int, runner: Optional[Runner] 
         print()
         return EXIT_OK
     finally:
+        _ignore_session_signals()
         if helper is not None:
             helper.set()
         dock.restore()

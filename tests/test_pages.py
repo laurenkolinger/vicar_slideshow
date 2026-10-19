@@ -82,6 +82,28 @@ class PageTests(unittest.TestCase):
             for script in page.scripts:
                 self.assertIsNone(FILE_URL_LITERAL.search(script), f"{name}: file:// URL literal in script")
 
+    def test_grid_header_uses_the_singular_for_one_slide(self):
+        text, _ = parse("slideshow.html")
+        line = next(l for l in text.splitlines() if "grid-count" in l and "textContent" in l)
+        self.assertIn("=== 1 ?", line, "the count word depends on the number of slides")
+        self.assertIn("'slide'", line)
+        self.assertNotIn("} slides`", line, "a fixed plural would read '1 slides'")
+
+    def test_screensaver_rule_line_needs_a_number_or_a_chapter(self):
+        text, _ = parse("screensaver.html")
+        pushes = [l.strip() for l in text.splitlines() if "cap-meta\">" not in l and 'class="rule"' in l and "push" in l]
+        self.assertEqual(len(pushes), 1)
+        self.assertTrue(pushes[0].startswith("if (hasNumber || slide.chapter)"), pushes[0])
+        self.assertNotIn("""const metaBits = ['<span class="rule">""", text, "the rule must not start the list unconditionally")
+        self.assertIn("metaBits.length ?", text, "an empty meta row is not rendered")
+
+    def test_page_comments_are_plain_sentences(self):
+        screensaver, _ = parse("screensaver.html")
+        slideshow, _ = parse("slideshow.html")
+        self.assertNotIn("Exit on any user input: but", screensaver)
+        self.assertIn("/* Top caption bar with a solid black background */", slideshow)
+        self.assertNotIn("solid black ", slideshow.replace("solid black background", ""))
+
 
 if __name__ == "__main__":
     unittest.main()

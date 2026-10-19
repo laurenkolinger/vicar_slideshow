@@ -18,7 +18,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.helpers import REPO, FFMPEG, TempDirTestCase, make_content, make_png, make_repo, make_video
+from tests.helpers import REPO, FFMPEG, LaunchGuardMixin, TempDirTestCase, make_content, make_png, make_repo, make_video
 from tests.test_content import make_undecodable
 from vicar_showcase import cli
 
@@ -39,7 +39,7 @@ def sha(path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-class CliInProcessTests(TempDirTestCase):
+class CliInProcessTests(LaunchGuardMixin, TempDirTestCase):
     """cli.main with a temporary repository."""
 
     def setUp(self):
@@ -299,14 +299,22 @@ class CliInProcessTests(TempDirTestCase):
         self.assertEqual(sha(dest / "captions.csv"), sha(cap))
 
 
-class CliSubprocessTests(TempDirTestCase):
-    """The real script as a subprocess, in a temporary repository copy."""
+class CliSubprocessTests(LaunchGuardMixin, TempDirTestCase):
+    """The real script as a subprocess, in a temporary repository copy (only this Python may start)."""
+
+    allowed_programs = (sys.executable,)
 
     def setUp(self):
         super().setUp()
         self.content = self.tmp / "content"; self.content.mkdir()
         make_content(self.content)
         self.repo = make_repo(self.tmp, self.content)
+        self.addCleanup(self._only_this_python_started)
+
+    def _only_this_python_started(self):
+        """Fail when any program other than this Python was started."""
+        for call in self.guard.started:
+            self.assertIn(repr(sys.executable), call)
 
     def sh(self, *args, env=None, cwd=None):
         base = {k: v for k, v in os.environ.items() if k != "VICAR_SHOWCASE_CONTENT"}
@@ -382,8 +390,10 @@ class CliSubprocessTests(TempDirTestCase):
         proc.wait(timeout=10)
 
 
-class WrapperTests(TempDirTestCase):
-    """The two .command wrappers, with a stub python3."""
+class WrapperTests(LaunchGuardMixin, TempDirTestCase):
+    """The two .command wrappers, with a stub python3 (only bash may start, with a PATH holding the stub)."""
+
+    allowed_programs = ("/bin/bash",)
 
     def stub_bin(self, python_ok=True):
         bindir = self.tmp / "bin"; bindir.mkdir()
