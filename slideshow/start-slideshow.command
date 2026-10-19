@@ -1,67 +1,26 @@
 #!/bin/bash
-# Double-click this file to launch the VICAR slideshow.
-# It (1) regenerates _manifest.json from slideshow_media/ contents,
-#    (2) starts a local web server in this folder,
-#    (3) opens the slideshow in your default browser.
-#
-# To reorder slides: rename files in slideshow_media/ (change the NN_ prefix).
-# To edit captions: open captions.csv next to this file. The slideshow looks up
-#   captions by the 'title' column, which is the filename without the NN_ prefix
-#   and without the extension. Renumbering files does NOT break captions.
+# VICAR Lab slideshow launcher (double-click on macOS, or run from a terminal).
+# Thin wrapper: finds Python 3.10 or newer and runs `showcase.py slideshow`
+# from the repository root. All behaviour lives in showcase.py and vicar_showcase/.
+# The content folder comes from settings.json (see README.md); extra arguments
+# such as --content DIR or --port N are passed through.
 
 set -e
-cd "$(dirname "$0")"
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-PORT=8765
-URL="http://localhost:${PORT}/slideshow.html"
+PYTHON=""
+for candidate in python3 python; do
+  if command -v "${candidate}" >/dev/null 2>&1 \
+     && "${candidate}" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
+    PYTHON="${candidate}"
+    break
+  fi
+done
 
-if command -v python3 >/dev/null 2>&1; then
-  PYTHON=python3
-elif command -v python >/dev/null 2>&1; then
-  PYTHON=python
-else
-  echo "Python is not installed. Install Python 3 to run the slideshow."
-  read -r -p "Press return to close this window."
+if [ -z "${PYTHON}" ]; then
+  echo "Python 3.10 or newer is required to run the slideshow."
+  if [ -t 0 ]; then read -r -p "Press return to close this window."; fi
   exit 1
 fi
 
-# Regenerate manifest from current folder contents
-"${PYTHON}" - <<'PY'
-import json, os
-folder = 'slideshow_media'
-files = sorted([
-    f for f in os.listdir(folder)
-    if not f.startswith('.') and not f.startswith('_')
-])
-with open('_manifest.json', 'w') as fp:
-    json.dump({'folder': folder, 'files': files}, fp, indent=2)
-print(f"  manifest: {len(files)} files in {folder}/")
-PY
-
-# Generate any missing video thumbnails for the grid view
-if command -v ffmpeg >/dev/null 2>&1; then
-  mkdir -p _thumbs
-  for f in slideshow_media/*.mp4 slideshow_media/*.mov slideshow_media/*.webm; do
-    [ -f "$f" ] || continue
-    base=$(basename "$f")
-    name="${base%.*}"
-    out="_thumbs/${name}.jpg"
-    if [ ! -f "$out" ]; then
-      echo "  thumb: ${name}"
-      ffmpeg -y -loglevel error -ss 0.5 -i "$f" -vframes 1 -vf "scale=480:-2" -q:v 4 "$out" 2>/dev/null
-    fi
-  done
-fi
-
-echo ""
-echo "  VICAR slideshow"
-echo "  ----------------"
-echo "  Serving:  $(pwd)"
-echo "  URL:      ${URL}"
-echo ""
-echo "  Opening browser in 2 seconds. Press Ctrl+C in this window to stop the server."
-echo ""
-
-( sleep 2 && open "${URL}" ) &
-
-exec "${PYTHON}" -m http.server "${PORT}" --bind 127.0.0.1
+exec "${PYTHON}" showcase.py slideshow "$@"

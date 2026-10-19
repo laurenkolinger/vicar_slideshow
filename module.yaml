@@ -1,10 +1,12 @@
 # ==============================================================================
 # MODULE INTERFACE DEFINITION: VICAR Lab Showcase
 # ==============================================================================
-# A resource / viewer module (NOT a data-processing stage). It surfaces the
-# VICAR Lab slideshow + screensaver inside VICARIUS as a pop-out, and lets you
-# add media to the showcase from the UI. No data-dictionary outputs, no runner,
-# no CLI. Rendering is driven by `ui.style: showcase` (see module_views.py).
+# A resource / viewer module (NOT a data-processing stage). It shows the VICAR
+# Lab screensaver and slideshow as pop-out windows inside VICARIUS and lets you
+# add media from the UI. The slides and captions live in a content folder named
+# by settings.json, outside the repository; `showcase.py check --json` reports
+# that folder to the UI. No data-dictionary outputs, no runner, no CLI form.
+# Rendering is driven by `ui.style: showcase` (see module_views.py).
 # ==============================================================================
 
 name: "vicar_slideshow"
@@ -12,8 +14,8 @@ display_name: "VICAR Lab Showcase"           # short title on the UI card; REQUI
 tags: ["MISC"]                               # filter tag; this is a misc resource, not a pipeline
 hidden: false
 hidden_reason: ""
-version: "1.1.0"
-description: "VICAR Lab slideshow + screensaver. Pop out a full-screen showcase of lab imagery and video, or add new media to the reel from the UI."
+version: "2.0.0"                             # 2.0.0: the content folder moved out of the repository
+description: "VICAR Lab screensaver and slideshow. Opens a full-screen showcase of lab imagery and video from a content folder named in settings.json, or adds new media to that folder from the UI."
 author: "Lauren Olinger"
 created: "2026-05-21"
 
@@ -21,8 +23,7 @@ created: "2026-05-21"
 type: "resource"
 
 # No data inputs/outputs: this module does not produce dictionary-bound
-# datasets, so there is deliberately NO EML/sidecar contract here
-# (per the backlog item: "categorize as misc. no data dictionary").
+# datasets, so there is deliberately NO EML/sidecar contract here.
 inputs: []
 outputs: []
 
@@ -30,26 +31,26 @@ outputs: []
 # VICARIUS UI: showcase style
 # ------------------------------------------------------------------------------
 # `style: showcase` tells module_views.py to render templates/module_showcase.html
-# instead of the generic runner form. The page offers pop-out viewers (served by
-# Flask from this module's static bundle) plus an "add media" uploader that drops
-# files into the media folder and refreshes the manifest.
+# instead of the generic runner form. Each view runs on its own server, started
+# with `serve_cmd` from the repository root, so a running view survives VICARIUS
+# restarts. `content_cmd` prints the content folder report (slides, thumbnails,
+# warnings) as JSON; the card reads the reel from it and writes uploads there.
 ui:
   style: showcase
-  bundle_dir: "slideshow"          # github_repo/<bundle_dir>/ holds the static showcase
-  media_dir: "slideshow_media"     # subfolder under bundle_dir that holds the slides
+  bundle_dir: "slideshow"                          # github_repo/<bundle_dir>/ holds the pages
+  content_cmd: ["showcase.py", "check", "--json"]  # reports the content folder named by settings.json
   views:
     - key: "screensaver"
       label: "Open Screensaver"
       file: "screensaver.html"
-      # detached: the view is served by its own http.server process on `port`,
-      # not by the VICARIUS Flask app, so a running screensaver survives
-      # VICARIUS restarts and can be stopped without touching the UI on 5090.
-      # The port matches slideshow/start-screensaver.command so the dock
-      # launcher and the UI reuse the same server when both are used.
       detached: true
       port: 8766
-      help: "Auto-advancing full-screen showcase (cursor hidden). Move the mouse, click, or press any key to exit. Runs on its own server (port 8766), so it keeps playing when VICARIUS quits or restarts."
+      serve_cmd: ["showcase.py", "serve", "--view", "screensaver", "--port", "8766"]
+      help: "Opens the auto-scrolling full-screen reel from the content folder named in settings.json. Move the mouse, click, or press any key to exit; Up and Down arrows dim and brighten. It runs on its own server (port 8766), so it keeps playing when VICARIUS restarts."
     - key: "slideshow"
       label: "Open Slideshow"
       file: "slideshow.html"
-      help: "Manual slideshow with a grid view. Space toggles grid/full-screen; arrow keys change slides."
+      detached: true
+      port: 8765
+      serve_cmd: ["showcase.py", "serve", "--view", "slideshow", "--port", "8765"]
+      help: "Opens the manual slideshow and grid from the content folder named in settings.json. Space toggles the grid, arrow keys change slides, and F toggles full screen. It runs on its own server (port 8765), so it keeps playing when VICARIUS restarts."

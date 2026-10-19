@@ -351,8 +351,8 @@
 <script>
 'use strict';
 
-const IMAGE_EXT = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif']);
-const VIDEO_EXT = new Set(['mp4', 'mov', 'webm', 'm4v']);
+const LAUNCHER = 'start-slideshow.command';
+const CLI = 'python3 showcase.py slideshow';
 
 const state = {
   mode: 'slideshow',
@@ -361,7 +361,6 @@ const state = {
   duration: 6000,
   timer: null,
   activeLayer: 'a',
-  folder: 'slideshow_media',
 };
 
 const $ = (id) => document.getElementById(id);
@@ -381,84 +380,44 @@ function toast(msg) {
 }
 
 // ============================================================
-// Manifest + CSV loading
+// Manifest and status messages
 // ============================================================
 async function loadManifest() {
   const r = await fetch('_manifest.json?t=' + Date.now());
-  if (!r.ok) throw new Error('Could not load _manifest.json — relaunch using start-slideshow.command to regenerate it.');
+  if (!r.ok) throw new Error('manifest request failed: ' + r.status);
   return r.json();
 }
 
-async function loadCaptions() {
-  const r = await fetch('captions.csv?t=' + Date.now());
-  if (!r.ok) return {};
-  return parseCsv(await r.text());
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
 }
+function codeText(s) { return `<code>${escapeHtml(s)}</code>`; }
 
-function parseCsv(text) {
-  const lines = text.replace(/\r\n?/g, '\n').split('\n');
-  if (!lines.length) return {};
-  const headers = parseCsvLine(lines[0]).map(h => h.trim());
-  const out = {};
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line || !line.trim()) continue;
-    const cells = parseCsvLine(line);
-    const row = {};
-    headers.forEach((h, idx) => { row[h] = (cells[idx] != null ? cells[idx] : '').trim(); });
-    if (row.title) out[row.title] = row;
+// Turns the manifest into a slide list, or shows the reason it cannot and returns null.
+function slidesFromManifest(manifest) {
+  if (manifest.error) {
+    setStatus('Content folder not found',
+      `${codeText(manifest.content_dir || '')}<br><br>Set <code>content_dir</code> in <code>settings.local.json</code> or <code>settings.json</code> in the repository, then run <code>python3 showcase.py check</code>.`);
+    return null;
   }
-  return out;
-}
-
-function parseCsvLine(line) {
-  const out = []; let cur = ''; let q = false;
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (q) {
-      if (c === '"') {
-        if (line[i+1] === '"') { cur += '"'; i++; }
-        else { q = false; }
-      } else { cur += c; }
-    } else {
-      if (c === ',') { out.push(cur); cur = ''; }
-      else if (c === '"') { q = true; }
-      else { cur += c; }
-    }
+  if (!Array.isArray(manifest.slides) || !manifest.slides.length) {
+    setStatus('No slides',
+      `Add images or videos to ${codeText(manifest.content_name || 'the content folder')} and relaunch. <code>python3 showcase.py check</code> lists any file that is not shown and why.`);
+    return null;
   }
-  out.push(cur);
-  return out;
+  return manifest.slides;
 }
 
-function parseFilename(file) {
-  // NN_title-with-dashes.ext  →  { num, title, ext }
-  const m = file.match(/^(\d+)[_-](.+)\.([^.]+)$/);
-  if (!m) return null;
-  return { num: m[1], title: m[2], ext: m[3].toLowerCase() };
+function showFileProtocolStatus() {
+  setStatus('Open with the launcher',
+    `Chrome blocks local media over <code>file://</code>. Start it with <strong>${LAUNCHER}</strong> or <code>${CLI}</code>.`);
 }
 
-function buildSlides(manifest, captions) {
-  const list = [];
-  for (const file of manifest.files) {
-    const p = parseFilename(file);
-    if (!p) continue;
-    let type = null;
-    if (IMAGE_EXT.has(p.ext)) type = 'image';
-    else if (VIDEO_EXT.has(p.ext)) type = 'video';
-    if (!type) continue;
-    const cap = captions[p.title] || {};
-    list.push({
-      file,
-      url: `${manifest.folder || state.folder}/${encodeURIComponent(file)}`,
-      type,
-      number: p.num,
-      title: p.title,
-      caption: cap.caption || '',
-      credit: cap.credit || '',
-      chapter: cap.chapter || '',
-    });
-  }
-  return list;
+function showServerDownStatus() {
+  setStatus('Server not reachable',
+    `Relaunch with <strong>${LAUNCHER}</strong> or <code>${CLI}</code>.`);
 }
 
 // ============================================================
@@ -474,7 +433,7 @@ function showSlide(index) {
   cleanupLayer(incoming);
 
   let media;
-  if (slide.type === 'image') {
+  if (slide.kind === 'image') {
     media = document.createElement('img');
     media.alt = slide.title;
     // Pick one of six Ken Burns directions and start it as soon as the image
@@ -510,7 +469,7 @@ function showSlide(index) {
   state.activeLayer = nextKey;
 
   clearTimeout(state.timer);
-  if (slide.type === 'image') {
+  if (slide.kind === 'image') {
     state.timer = setTimeout(advance, state.duration);
     startProgress(state.duration);
   } else {
@@ -522,7 +481,7 @@ function showSlide(index) {
 }
 
 function onMediaError(slide) {
-  setStatus('Could not load', `<code>${slide.file}</code><br><br>If you opened this with <code>file://</code>, close the tab and double-click <strong>start-slideshow.command</strong> — Chrome blocks local subfolder media without a server.`);
+  setStatus('Could not load', `${codeText(slide.file)}<br><br>Relaunch with <strong>${LAUNCHER}</strong> or <code>${CLI}</code>.`);
   clearTimeout(state.timer);
   state.timer = setTimeout(advance, 3500);
 }
@@ -549,7 +508,7 @@ function updateCaption(slide, index) {
   $('cap-num').textContent = slide.number || n;
   $('cap-chapter').textContent = (slide.chapter || 'VICAR LAB').toUpperCase();
   $('cap-title-id').textContent = slide.title;
-  $('cap-caption').textContent = slide.caption || '(no caption found in captions.csv for title "' + slide.title + '")';
+  $('cap-caption').textContent = slide.caption || '(no caption in captions.csv in the content folder for title "' + slide.title + '")';
   $('counter').textContent = `${n} / ${total}`;
   $('credit').textContent = slide.credit ? slide.credit : '';
 }
@@ -598,12 +557,6 @@ function startSlideshow() {
   // After the transition finishes, hard-hide grid so it doesn't intercept clicks.
   setTimeout(() => { $('grid').hidden = true; }, 500);
 }
-function videoThumbUrl(slide) {
-  // For videos, look in _thumbs/<base>.jpg where base is the filename minus extension.
-  const base = slide.file.replace(/\.[^.]+$/, '');
-  return `_thumbs/${encodeURIComponent(base)}.jpg`;
-}
-
 function renderGrid() {
   const root = $('grid-root');
   root.innerHTML = '';
@@ -624,7 +577,7 @@ function renderGrid() {
     section.className = 'chapter-section';
     const head = document.createElement('div');
     head.className = 'head';
-    head.innerHTML = `<span class="name">${key.toUpperCase()}</span><span class="count">· ${items.length} items</span>`;
+    head.innerHTML = `<span class="name">${escapeHtml(key.toUpperCase())}</span><span class="count">· ${items.length} items</span>`;
     section.appendChild(head);
 
     const grid = document.createElement('div');
@@ -648,17 +601,14 @@ function renderGrid() {
 
       const img = document.createElement('img');
       img.loading = 'lazy';
-      if (slide.type === 'image') {
-        img.src = slide.url;
-      } else {
-        // First-frame thumbnail from _thumbs/ folder
-        img.src = videoThumbUrl(slide);
+      img.src = slide.thumb;
+      if (slide.kind === 'video') {
         // If the thumb is missing, hide the broken-image icon by clearing src
         img.addEventListener('error', () => { img.removeAttribute('src'); }, { once: true });
       }
       cell.appendChild(img);
 
-      if (slide.type === 'video') {
+      if (slide.kind === 'video') {
         const badge = document.createElement('span');
         badge.className = 'video-badge';
         badge.textContent = 'VIDEO';
@@ -688,7 +638,7 @@ document.querySelectorAll('.hud-btn[data-dur]').forEach(btn => {
     toast(`Slide duration · ${state.duration / 1000}s`);
     if (state.mode === 'slideshow') {
       const cur = state.slides[state.currentIndex];
-      if (cur && cur.type === 'image') {
+      if (cur && cur.kind === 'image') {
         clearTimeout(state.timer);
         state.timer = setTimeout(advance, state.duration);
         startProgress(state.duration);
@@ -730,28 +680,20 @@ document.addEventListener('keydown', (e) => {
 // Boot
 // ============================================================
 (async function boot() {
-  if (location.protocol === 'file:') {
-    setStatus(
-      'Open via the launcher',
-      `You opened this with <code>file://</code>. Chrome blocks the media folder over <code>file://</code>.<br><br>` +
-      `Close this tab and double-click <strong>start-slideshow.command</strong>.`
-    );
+  if (location.protocol === 'file:') { showFileProtocolStatus(); return; }
+  setStatus('Loading', 'Reading the content folder.');
+  let manifest;
+  try {
+    manifest = await loadManifest();
+  } catch (e) {
+    showServerDownStatus();
     return;
   }
-  setStatus('Loading', 'Reading manifest and captions.');
-  try {
-    const [manifest, captions] = await Promise.all([loadManifest(), loadCaptions()]);
-    if (manifest.folder) state.folder = manifest.folder;
-    state.slides = buildSlides(manifest, captions);
-    if (!state.slides.length) {
-      setStatus('No slides', 'The manifest is empty. Drop files into <code>slideshow_media/</code> with the form <code>NN_title.ext</code>, then relaunch <code>start-slideshow.command</code>.');
-      return;
-    }
-    setStatus('Loading', `${state.slides.length} slides queued.`);
-    showSlide(0);
-  } catch (e) {
-    setStatus('Boot error', e.message + '<br><br>Relaunch using <strong>start-slideshow.command</strong> to regenerate the manifest.');
-  }
+  const slides = slidesFromManifest(manifest);
+  if (!slides) return;
+  state.slides = slides;
+  setStatus('Loading', `${state.slides.length} slides queued.`);
+  showSlide(0);
 })();
 </script>
 </body>

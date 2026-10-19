@@ -1,35 +1,52 @@
 #!/usr/bin/env bash
-# pre-commit: keep heavy media out of the vicar_slideshow repo.
+# pre-commit: keep content and heavy files out of the vicar_slideshow repo.
 #
-# slideshow_media/ and _thumbs/ are gitignored, so this hook is the backstop
-# against `git add -f <media>` and against any oversized file slipping in --
-# GitHub hard-rejects files larger than 100 MB on push, which would strand the
-# whole commit. Blocks: anything under the media dirs, or any file over 95 MB.
+# Slides and captions live in the content folder named by settings.json, never
+# in git. The media folders and caches are gitignored, so this hook is the
+# backstop against `git add -f <file>` and against any oversized file slipping
+# in. GitHub hard-rejects files larger than 100 MB on push, which would strand
+# the whole commit. Blocks: anything under the media, thumbnail or cache dirs,
+# settings.local.json, any file over 95 MB, and any image or video over 2 MB.
 set -euo pipefail
 
-max_bytes=$((95 * 1024 * 1024))   # 95 MB, just under GitHub's 100 MB ceiling
+max_bytes=$((95 * 1024 * 1024))     # 95 MB, just under GitHub's 100 MB ceiling
+max_media_bytes=$((2 * 1024 * 1024)) # 2 MB cap for any image or video
 blocked=""
 
 while IFS= read -r f; do
     [ -z "$f" ] && continue
     case "$f" in
-        slideshow/slideshow_media/*|*/slideshow_media/*|slideshow/_thumbs/*|*/_thumbs/*)
-            blocked+="  [media dir]  $f"$'\n' ;;
+        slideshow/slideshow_media/*|*/slideshow_media/*|slideshow/_thumbs/*|*/_thumbs/*|.cache/*|*/.cache/*)
+            blocked+="  [content or cache dir]  $f"$'\n' ;;
+    esac
+    case "$f" in
+        settings.local.json|*/settings.local.json)
+            blocked+="  [machine settings]  $f"$'\n' ;;
     esac
     if [ -f "$f" ]; then
         size=$(wc -c < "$f")
         if [ "$size" -gt "$max_bytes" ]; then
             blocked+="  [over 95 MB] $f ($((size / 1024 / 1024)) MB)"$'\n'
         fi
+        lower="${f,,}"
+        case "$lower" in
+            *.jpg|*.jpeg|*.png|*.gif|*.webp|*.avif|*.heic|*.mp4|*.mov|*.webm|*.m4v)
+                if [ "$size" -gt "$max_media_bytes" ]; then
+                    blocked+="  [image or video over 2 MB] $f ($((size / 1024)) KB)"$'\n'
+                fi ;;
+        esac
     fi
 done < <(git diff --cached --name-only --diff-filter=ACM)
 
 if [ -n "$blocked" ]; then
-    echo "pre-commit blocked -- heavy/media files must not be committed:" >&2
+    echo "pre-commit blocked: content and heavy files must not be committed:" >&2
     printf '%s' "$blocked" >&2
     echo "" >&2
-    echo "Media lives in slideshow/slideshow_media/ (gitignored) and ships" >&2
-    echo "out-of-band. GitHub rejects files over 100 MB, so they cannot be" >&2
-    echo "pushed even with --force. Unstage them and commit again." >&2
+    echo "Slides and captions.csv live in the content folder that settings.json" >&2
+    echo "(or settings.local.json) names, not in this repository. Put the file" >&2
+    echo "there, or use 'python3 showcase.py copy-content'. Only small example" >&2
+    echo "images (2 MB or less) may be committed, under example_content/." >&2
+    echo "Machine settings belong in settings.local.json, which is never committed." >&2
+    echo "Unstage the files above and commit again." >&2
     exit 1
 fi

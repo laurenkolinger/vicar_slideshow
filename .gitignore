@@ -1,10 +1,19 @@
-# Heavy slideshow media (~980 MB of mp4/jpg/png, individual files up to 271 MB).
-# Distributed out-of-band, never committed -- GitHub rejects files over 100 MB.
-# The pre-commit hook (.githooks/) is the backstop against `git add -f`.
-slideshow/slideshow_media/
+# Settings for one machine only (see README, "Point the tool at your content").
+settings.local.json
 
-# Generated thumbnails (regenerated from media on demand).
+# Generated caches, including video thumbnails.
+.cache/
+
+# Content never lives in git. It lives in the content folder named by settings.json.
+# No trailing slash, so a link of this name is ignored too.
+slideshow/slideshow_media
 slideshow/_thumbs/
+
+# Local leftovers from before the content folder moved out of the repository.
+# They stay on disk, untracked, and the tool does not use them.
+slideshow/captions.csv
+slideshow/captions.numbers
+slideshow/_manifest.json
 
 # Caches / envs / OS + editor cruft.
 env/
