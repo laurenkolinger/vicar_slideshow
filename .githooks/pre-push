@@ -3,7 +3,8 @@
 #
 # Thin shim installed into each ACTIVE module repo as .githooks/pre-push.
 # The real logic lives in the harness at .githooks/lib/modules-push-log.sh;
-# this file just finds and sources it. Blocking layers (schema drift, docs
+# this file just finds and sources it
+# (only from the VICARIUS checkout, see below). Blocking layers (schema drift, docs
 # freshness) stay harness-only by decision T20260521-182402 (2026-08-26).
 # This hook ALWAYS exits 0: a logging failure must never block a push.
 #
@@ -13,6 +14,10 @@
 #   chmod +x .githooks/pre-push
 #   git config core.hooksPath .githooks
 
+# The logger is shell code that this hook runs, so it is taken only from the VICARIUS
+# checkout: $VICARIUS_ROOT when that is set, or a parent folder that also holds
+# vicarius_ui_os/app.py (the checkout's signature). A parent folder that merely has a
+# file of the same name is not trusted: on someone else's machine it is not ours.
 lib=""
 if [ -n "${VICARIUS_ROOT:-}" ] && [ -f "${VICARIUS_ROOT}/.githooks/lib/modules-push-log.sh" ]; then
     lib="${VICARIUS_ROOT}/.githooks/lib/modules-push-log.sh"
@@ -20,7 +25,7 @@ else
     p="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
     while [ -n "${p}" ] && [ "${p}" != "/" ]; do
         p="$(dirname "${p}")"
-        if [ -f "${p}/.githooks/lib/modules-push-log.sh" ]; then
+        if [ -f "${p}/.githooks/lib/modules-push-log.sh" ] && [ -f "${p}/vicarius_ui_os/app.py" ]; then
             lib="${p}/.githooks/lib/modules-push-log.sh"
             break
         fi

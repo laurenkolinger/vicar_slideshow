@@ -5,13 +5,18 @@ Inputs: A temporary content folder and repository copy.
 Outputs: Test results.
 """
 
+import http.client
 import json
+import os
+import shutil
+import socket
 import unittest
 from unittest import mock
 
 from tests.helpers import FFMPEG, LiveServerTestCase, make_png, make_video, request
+from tests.test_content import make_undecodable
 from vicar_showcase import server as srv
-from vicar_showcase.server import parse_range, safe_name
+from vicar_showcase.server import host_allowed, parse_range, safe_name
 
 
 class ParseRangeTests(unittest.TestCase):
@@ -81,7 +86,6 @@ class RouteTests(LiveServerTestCase):
         self.assertEqual(len(json.loads(self.get("/_manifest.json")[2])["slides"]), 4)
 
     def test_manifest_when_folder_vanishes(self):
-        import shutil
         shutil.rmtree(self.content)
         data = json.loads(self.get("/_manifest.json")[2])
         self.assertIn("not found", data["error"])
@@ -126,10 +130,25 @@ class RouteTests(LiveServerTestCase):
         status, headers, _ = self.get("/media/01_alpha.png", "HEAD", {"Range": "bytes=0-3"})
         self.assertEqual((status, headers["content-length"]), (206, "4"))
 
-    def test_zero_byte_media_with_range(self):
+    def test_empty_and_conflicted_files_are_not_served(self):
+        """The server serves only what the scan lists: not an empty file, not a conflicted copy."""
         (self.content / "7_empty.png").write_bytes(b"")
-        self.assertEqual(self.get("/media/7_empty.png")[0], 200)
-        self.assertEqual(self.get("/media/7_empty.png", headers={"Range": "bytes=0-"})[0], 416)
+        (self.content / "8_a (conflicted copy).png").write_bytes(make_png())
+        for path in ("/media/7_empty.png", "/media/8_a%20(conflicted%20copy).png"):
+            self.assertEqual(self.get(path)[0], 404, path)
+            self.assertEqual(self.get(path, headers={"Range": "bytes=0-"})[0], 404, path)
+        listed = {s["file"] for s in json.loads(self.get("/_manifest.json")[2])["slides"]}
+        self.assertNotIn("7_empty.png", listed)
+
+    def test_media_matches_manifest_for_every_entry(self):
+        (self.content / "sub").mkdir()
+        (self.content / "sub" / "4_in.png").write_bytes(make_png())
+        os.symlink(self.content / "sub" / "4_in.png", self.content / "4_link.png")
+        (self.content / "empty.jpg").write_bytes(b"")
+        listed = {s["file"] for s in json.loads(self.get("/_manifest.json")[2])["slides"]}
+        for name in sorted(os.listdir(self.content)):
+            served = self.get("/media/" + name)[0] == 200
+            self.assertEqual(served, name in listed, name)
 
     def test_content_types(self):
         for name, ctype in (("a.mov", "video/quicktime"), ("a.m4v", "video/x-m4v"), ("a.webm", "video/webm"),
@@ -150,7 +169,6 @@ class RouteTests(LiveServerTestCase):
             self.assertEqual(self.get(path, "HEAD")[0], 404, path)
 
     def test_symlink_escape_not_served(self):
-        import os
         os.symlink(self.tmp / "secret.txt", self.content / "9_leak.png")
         os.symlink(self.tmp / "secret.txt", self.content / "9_leak2.txt")
         self.assertEqual(self.get("/media/9_leak.png")[0], 404)
@@ -162,9 +180,7 @@ class RouteTests(LiveServerTestCase):
         self.assertEqual(self.get("/media/doc.csv")[0], 404)
 
     def test_unknown_route_has_no_listing(self):
-        for path in ("/", "/media/", "/_thumbs/", "/foo"):
-            if path == "/":
-                continue
+        for path in ("/media/", "/_thumbs/", "/foo"):
             status, _, body = self.get(path)
             self.assertEqual(status, 404)
             self.assertNotIn(b"01_alpha", body)
@@ -183,11 +199,60 @@ class RouteTests(LiveServerTestCase):
         self.assertEqual(self.server.server_address[0], "127.0.0.1")
 
     def test_connection_reset_is_quiet(self):
-        import socket
         sock = socket.create_connection(("127.0.0.1", self.port))
         sock.sendall(b"GET /media/01_alpha.png HTTP/1.1\r\nHost: x\r\n\r\n")
         sock.close()
         self.assertEqual(self.get("/_showcase_info.json")[0], 200)
+
+    def test_undecodable_file_name_does_not_break_the_manifest(self):
+        name = make_undecodable(self.content)
+        if name is None:
+            self.skipTest("this platform refuses file names that are not valid UTF-8")
+        status, _, body = self.get("/_manifest.json")
+        self.assertEqual(status, 200)
+        files = [s["file"] for s in json.loads(body)["slides"]]
+        self.assertEqual(files, ["01_alpha.png", "02-beta.png", "10_gamma.png"])
+
+    def test_host_header_must_name_this_server(self):
+        port = self.port
+        for host in (f"127.0.0.1:{port}", f"localhost:{port}", "127.0.0.1", "localhost", f"LOCALHOST:{port}"):
+            self.assertEqual(self.get("/_manifest.json", headers={"Host": host})[0], 200, host)
+        for host in ("evil.example", f"evil.example:{port}", f"127.0.0.1:{port + 1}", "127.0.0.1.evil.example",
+                     f"localhost.evil.example:{port}", "", "[::1]"):
+            for path in ("/_manifest.json", "/_showcase_info.json", "/media/01_alpha.png", "/"):
+                self.assertEqual(self.get(path, headers={"Host": host})[0], 403, (host, path))
+
+    def test_host_allowed_cases(self):
+        self.assertTrue(host_allowed("localhost:8766", 8766))
+        self.assertTrue(host_allowed("127.0.0.1", 8766))
+        self.assertFalse(host_allowed("localhost:1", 8766))
+        self.assertFalse(host_allowed(None, 8766))
+        self.assertFalse(host_allowed("evil.example", 8766))
+
+    def raw(self, request_bytes):
+        """Send raw bytes on one connection; return everything the server sent before it closed."""
+        sock = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        self.addCleanup(sock.close)
+        sock.sendall(request_bytes)
+        received = b""
+        try:
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                received += chunk
+        except socket.timeout:
+            self.fail("the connection stayed open")
+        return received
+
+    def test_refused_post_body_is_not_read_as_a_second_request(self):
+        smuggled = f"GET /_manifest.json HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\n\r\n".encode()
+        head = (f"POST /_manifest.json HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\n"
+                f"Content-Length: {len(smuggled)}\r\n\r\n").encode()
+        received = self.raw(head + smuggled)
+        self.assertEqual(received.count(b"HTTP/1.1 "), 1, received[:300])
+        self.assertTrue(received.startswith(b"HTTP/1.1 405"))
+        self.assertIn(b"Connection: close", received)
 
     def test_thumb_unknown_is_404(self):
         self.assertEqual(self.get("/_thumbs/nothing.jpg")[0], 404)
@@ -206,24 +271,65 @@ class ThumbRouteTests(LiveServerTestCase):
             out.write_bytes(b"\xff\xd8thumb")
             return out
         with mock.patch.object(srv, "ensure_thumb", side_effect=fake_ensure) as ensure:
-            status, headers, body = request(self.port, "GET", "/_thumbs/04_clip.jpg")
+            status, headers, body = request(self.port, "GET", "/_thumbs/04_clip.mp4.jpg")
         self.assertEqual((status, headers["content-type"], body), (200, "image/jpeg", b"\xff\xd8thumb"))
         self.assertEqual(ensure.call_count, 1)
+
+    def test_same_stem_videos_get_their_own_thumbnails(self):
+        (self.content / "20_clip.mp4").write_bytes(b"mp4 bytes")
+        (self.content / "20_clip.mov").write_bytes(b"mov bytes")
+        seen = []
+
+        def fake_ensure(thumbs_dir, video, **kw):
+            seen.append(video.name)
+            out = thumbs_dir / (video.name + ".jpg")
+            thumbs_dir.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"\xff\xd8" + video.name.encode())
+            return out
+
+        slides = json.loads(request(self.port, "GET", "/_manifest.json")[2])["slides"]
+        urls = {s["file"]: s["thumb"] for s in slides if s["kind"] == "video"}
+        self.assertEqual(len(set(urls.values())), 2)
+        with mock.patch.object(srv, "ensure_thumb", side_effect=fake_ensure):
+            for file_name, url in urls.items():
+                body = request(self.port, "GET", "/" + url)[2]
+                self.assertEqual(body, b"\xff\xd8" + file_name.encode())
+        self.assertEqual(sorted(seen), ["20_clip.mov", "20_clip.mp4"])
+
+    def test_thumbnail_route_refuses_images_and_unlisted_videos(self):
+        (self.content / "21_gone.mp4").write_bytes(b"")
+        with mock.patch.object(srv, "ensure_thumb", side_effect=AssertionError("must not be called")):
+            for path in ("/_thumbs/01_alpha.png.jpg", "/_thumbs/21_gone.mp4.jpg", "/_thumbs/22_nothing.mp4.jpg"):
+                self.assertEqual(request(self.port, "GET", path)[0], 404, path)
 
     def test_thumbnail_failure_is_404(self):
         (self.content / "04_clip.mp4").write_bytes(b"fake")
         with mock.patch.object(srv, "ensure_thumb", return_value=None):
-            self.assertEqual(request(self.port, "GET", "/_thumbs/04_clip.jpg")[0], 404)
+            self.assertEqual(request(self.port, "GET", "/_thumbs/04_clip.mp4.jpg")[0], 404)
 
     @unittest.skipUnless(FFMPEG, "ffmpeg is not installed")
     def test_real_video_thumbnail_and_range(self):
         video = self.content / "05_real.mp4"
         self.assertTrue(make_video(video))
-        status, headers, body = request(self.port, "GET", "/_thumbs/05_real.jpg")
+        status, headers, body = request(self.port, "GET", "/_thumbs/05_real.mp4.jpg")
         self.assertEqual((status, body[:2]), (200, b"\xff\xd8"))
         status, headers, body = request(self.port, "GET", "/media/05_real.mp4", {"Range": "bytes=0-99"})
         self.assertEqual((status, len(body), headers["content-type"]), (206, 100, "video/mp4"))
         self.assertEqual(body, video.read_bytes()[:100])
+
+
+class StreamTests(LiveServerTestCase):
+    """Sending files, and the listening socket."""
+
+    def test_file_that_shrinks_while_sent_closes_the_connection(self):
+        data = (self.content / "01_alpha.png").read_bytes()
+        real_size = len(data)
+        with mock.patch.object(srv, "file_size", return_value=real_size + 1000):
+            with self.assertRaises(http.client.IncompleteRead):
+                request(self.port, "GET", "/media/01_alpha.png")
+
+    def test_address_reuse_is_off_on_windows_only(self):
+        self.assertEqual(srv.QuietServer.allow_reuse_address, os.name != "nt")
 
 
 if __name__ == "__main__":

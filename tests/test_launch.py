@@ -6,7 +6,10 @@ Outputs: Test results.
 """
 
 import http.server
+import io
+import contextlib
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -68,10 +71,16 @@ class FakeRunner(Runner):
     def exists(self, path):
         return path in self.files
 
+    def run_foreground(self, args):
+        self.calls.append(list(args))
+        if self.run_raises:
+            raise self.run_raises
+        return subprocess.CompletedProcess(args, 0)
+
     def run(self, args, timeout=None):
         self.calls.append(list(args))
-        if self.run_raises and args[0] not in ("gsettings", "wmctrl"):
-            raise self.run_raises
+        if args[0] not in ("gsettings", "wmctrl"):
+            raise AssertionError(f"a browser or other program went through run(): {args}")
         if args[0] == "gsettings":
             sub = args[1]
             if sub == "writable":
@@ -121,6 +130,18 @@ class DetectTests(unittest.TestCase):
         want = os.path.join("C:\\Program Files", launch.WINDOWS_CHROME_PARTS[0])
         self.assertEqual(launch.detect_browser("win32", FakeRunner(files=[want]), env), want)
         self.assertIsNone(launch.detect_browser("win32", FakeRunner(), {}))
+
+    def test_windows_edge_is_found_when_chrome_is_not(self):
+        env = {"ProgramFiles(x86)": "C:\\Program Files (x86)"}
+        want = os.path.join("C:\\Program Files (x86)", launch.WINDOWS_CHROME_PARTS[-1])
+        self.assertIn("msedge.exe", want)
+        self.assertEqual(launch.detect_browser("win32", FakeRunner(files=[want]), env), want)
+
+    def test_macos_user_applications_folder(self):
+        with mock.patch.dict(os.environ, {"HOME": "/Users/someone"}):
+            want = "/Users/someone/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+            self.assertEqual(launch.detect_browser("darwin", FakeRunner(files=[want])), want)
+            self.assertIsNone(launch.detect_browser("darwin", FakeRunner(files=["/Users/other/Applications/x"])))
 
     def test_unknown_platform(self):
         self.assertIsNone(launch.detect_browser("plan9", FakeRunner(["google-chrome"])))
@@ -224,6 +245,12 @@ class EnsureServerTests(TempDirTestCase):
         self.assertEqual(argv[1:], [str(self.settings.repo_dir / "showcase.py"), "serve", "--view", "slideshow", "--port", "8765"])
         self.assertEqual(kwargs["cwd"], str(self.settings.repo_dir))
 
+    def test_start_failure_hint_names_the_view_and_port(self):
+        runner = FakeRunner(child=FakeChild(exit_code=1))
+        with self.assertRaises(LaunchError) as ctx:
+            launch.ensure_server(self.settings, "screensaver", 8766, runner, lambda p: None, lambda p: False)
+        self.assertIn("python3 showcase.py serve --view screensaver --port 8766", str(ctx.exception))
+
     def test_child_exits_early(self):
         runner = FakeRunner(child=FakeChild(exit_code=1))
         with self.assertRaisesRegex(LaunchError, "stopped at start"):
@@ -325,13 +352,82 @@ class RunViewTests(TempDirTestCase):
         sets = [c for c in runner.named("gsettings") if c[1] == "set"]
         self.assertEqual([c[-1] for c in sets], ["false", "true"])
 
+    def test_browser_that_cannot_start_is_reported_and_everything_is_cleaned_up(self):
+        """The real runner raises OSError for a program it cannot start; the session must say so and exit 1."""
+        missing = str(self.tmp / "no-such-dir" / "Google Chrome")
+        probes = iter([None, {"app": "vicar-showcase"}])
+
+        class RealBrowserRunner(FakeRunner):
+            """Fake everything except the browser start, which uses the real runner method."""
+            run_foreground = Runner.run_foreground
+
+        runner = RealBrowserRunner(files=[missing])
+        err = io.StringIO()
+        with mock.patch.object(launch, "MAC_CHROME_PATHS", (missing,)), contextlib.redirect_stderr(err):
+            code = launch.run_view(self.settings, "screensaver", 8766, runner, "darwin",
+                                   lambda p: next(probes, {"app": "vicar-showcase"}), lambda p: False)
+        self.assertEqual(code, 1)
+        self.assertIn("could not be started", err.getvalue())
+        self.assertIn(missing, err.getvalue())
+        self.assertTrue(runner.child.terminated)
+
     def test_dock_restored_when_browser_fails(self):
         runner = FakeRunner(["google-chrome", "gsettings"])
         runner.run_raises = OSError("chrome crashed")
-        with self.assertRaises(OSError):
-            self.run_view("screensaver", runner)
+        self.assertEqual(self.run_view("screensaver", runner), 1)
         sets = [c for c in runner.named("gsettings") if c[1] == "set"]
         self.assertEqual([c[-1] for c in sets], ["false", "true"])
+
+    def test_ctrl_c_during_the_kiosk_browser_exits_quietly_after_cleanup(self):
+        probes = iter([None, {"app": "vicar-showcase"}])
+        runner = FakeRunner(["google-chrome", "gsettings"])
+        runner.run_raises = KeyboardInterrupt()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = self.run_view("screensaver", runner, probe=lambda p: next(probes, {"app": "vicar-showcase"}))
+        self.assertEqual((code, err.getvalue()), (0, ""))
+        self.assertTrue(runner.child.terminated)
+        sets = [c for c in runner.named("gsettings") if c[1] == "set"]
+        self.assertEqual([c[-1] for c in sets], ["false", "true"])
+
+    @unittest.skipUnless(hasattr(signal, "SIGHUP"), "SIGHUP exists on POSIX only")
+    def test_closing_the_terminal_stops_the_server_and_restores_the_dock(self):
+        probes = iter([None, {"app": "vicar-showcase"}])
+        runner = FakeRunner(["google-chrome", "gsettings"])
+        original = signal.getsignal(signal.SIGHUP)
+        seen = {}
+
+        def hang_up(args):
+            handler = signal.getsignal(signal.SIGHUP)
+            seen["installed"] = handler not in (signal.SIG_DFL, signal.SIG_IGN, original)
+            handler(signal.SIGHUP, None)  # what the signal does when the terminal closes
+
+        runner.run_foreground = hang_up
+        with self.assertRaises(SystemExit) as ctx:
+            self.run_view("screensaver", runner, probe=lambda p: next(probes, {"app": "vicar-showcase"}))
+        self.assertTrue(seen["installed"], "SIGHUP has no handler during a session")
+        self.assertEqual(ctx.exception.code, 128 + signal.SIGHUP)
+        self.assertTrue(runner.child.terminated)
+        sets = [c for c in runner.named("gsettings") if c[1] == "set"]
+        self.assertEqual([c[-1] for c in sets], ["false", "true"])
+        self.assertEqual(signal.getsignal(signal.SIGHUP), original, "the old handler is put back")
+
+    def test_reused_server_message_does_not_claim_ctrl_c_stops_it(self):
+        out = io.StringIO()
+        runner = FakeRunner()
+        # Reused server: no child. Ctrl+C is simulated by making the wait raise.
+        runner.sleep = mock.Mock(side_effect=KeyboardInterrupt())
+        with contextlib.redirect_stdout(out):
+            launch._open_default("http://x/", runner, "linux", None)
+        self.assertIn("belongs to another window", out.getvalue())
+        self.assertIn("only closes this launcher", out.getvalue())
+        self.assertNotIn("stop the server", out.getvalue())
+
+    def test_own_server_message_says_ctrl_c_stops_it(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            launch._open_default("http://x/", FakeRunner(), "linux", FakeChild(wait_raises=KeyboardInterrupt()))
+        self.assertIn("Press Ctrl+C in this window to stop the server.", out.getvalue())
 
     def test_reused_server_is_never_stopped(self):
         runner = FakeRunner(["google-chrome"])
@@ -373,6 +469,20 @@ class RunViewTests(TempDirTestCase):
         self.run_view("screensaver", runner, platform="darwin")
         self.assertEqual(runner.calls[0][0], launch.MAC_CHROME_PATHS[0])
         self.assertEqual(runner.named("gsettings"), [])
+
+
+class RealRunnerTests(TempDirTestCase):
+    """The real Runner's browser method (run only against this Python, never a browser)."""
+
+    def test_foreground_discards_output_and_returns_the_result(self):
+        result = Runner().run_foreground([sys.executable, "-c", "print('x' * 100000); import sys; sys.exit(3)"])
+        self.assertEqual(result.returncode, 3)
+        self.assertIsNone(result.stdout)
+        self.assertIsNone(result.stderr)
+
+    def test_foreground_raises_oserror_for_a_missing_program(self):
+        with self.assertRaises(OSError):
+            Runner().run_foreground([str(self.tmp / "no-such-browser")])
 
 
 class RealChildTests(TempDirTestCase):

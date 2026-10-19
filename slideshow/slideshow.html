@@ -112,7 +112,7 @@
   }
 
   /* ============================================================ */
-  /* Top caption bar — solid black                                 */
+  /* Top caption bar, solid black                              */
   /* ============================================================ */
   #cap {
     position: fixed; top: 0; left: 0; right: 0; z-index: 50;
@@ -177,6 +177,9 @@
   }
   .hud-btn:hover { color: var(--magenta-soft); border-color: var(--magenta); background: rgba(226,0,116,0.06); }
   .hud-btn.active { color: var(--magenta-soft); border-color: var(--magenta); }
+  .hud-btn:disabled { cursor: default; opacity: 0.35; }
+  .hud-btn:disabled:hover { color: var(--bone); border-color: var(--rule); background: none; }
+  .hud-btn.active:disabled:hover { color: var(--magenta-soft); border-color: var(--magenta); }
   .hud-group { display: flex; gap: 0; }
   .hud-group .hud-btn { border-right: 0; }
   .hud-group .hud-btn:last-child { border-right: 1px solid var(--rule); }
@@ -265,7 +268,7 @@
     transform: translate(-50%, -50%);
     text-align: center; z-index: 80;
     pointer-events: none;
-    max-width: 640px; padding: 36px;
+    width: min(640px, calc(100vw - 32px)); padding: 36px;
     transition: opacity 0.3s;
   }
   #status.hidden { opacity: 0; }
@@ -283,7 +286,10 @@
     background: rgba(226,0,116,0.08);
     padding: 2px 6px;
     border: 1px solid rgba(226,0,116,0.25);
+    white-space: nowrap;
   }
+  /* A folder name may be long: it wraps as a whole, never mid-chip elsewhere. */
+  #status code.folder { white-space: normal; overflow-wrap: anywhere; }
   .toast {
     position: fixed; bottom: 70px; left: 50%;
     transform: translateX(-50%) translateY(8px);
@@ -337,7 +343,7 @@
   </div>
   <button class="hud-btn" id="btn-prev">&larr; prev</button>
   <button class="hud-btn" id="btn-next">next &rarr;</button>
-  <button class="hud-btn" id="btn-grid">grid</button>
+  <button class="hud-btn" id="btn-grid" aria-pressed="false">grid</button>
   <button class="hud-btn" id="btn-full">fullscreen</button>
   <span class="credit" id="credit"></span>
 </div>
@@ -394,17 +400,45 @@ function escapeHtml(s) {
   }[c]));
 }
 function codeText(s) { return `<code>${escapeHtml(s)}</code>`; }
+function folderText(s) { return `<code class="folder">${escapeHtml(s)}</code>`; }
+
+// Readable fallback when a slide has no caption: the title with dashes and underscores as spaces.
+function readableTitle(title) {
+  return String(title || '').replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+// Controls follow the state: nothing works without slides, and grid mode
+// only keeps the Grid and Fullscreen buttons live.
+function syncControls() {
+  const hasSlides = state.slides.length > 0;
+  const inGrid = state.mode === 'grid';
+  document.querySelectorAll('.hud-btn[data-dur], #btn-prev, #btn-next').forEach(b => {
+    b.disabled = !hasSlides || inGrid;
+  });
+  $('btn-grid').disabled = !hasSlides;
+  $('btn-grid').classList.toggle('active', inGrid);
+  $('btn-grid').setAttribute('aria-pressed', inGrid ? 'true' : 'false');
+}
+
+// With nothing to show, the caption bar and counter give way to the centre message.
+function showEmptyChrome() {
+  $('cap').hidden = true;
+  $('counter').textContent = '';
+  syncControls();
+}
 
 // Turns the manifest into a slide list, or shows the reason it cannot and returns null.
 function slidesFromManifest(manifest) {
   if (manifest.error) {
     setStatus('Content folder not found',
-      `${codeText(manifest.content_dir || '')}<br><br>Set <code>content_dir</code> in <code>settings.local.json</code> or <code>settings.json</code> in the repository, then run <code>python3 showcase.py check</code>.`);
+      `${folderText(manifest.content_name || 'the content folder')}<br><br>Set <code>content_dir</code> in <code>settings.local.json</code> or <code>settings.json</code> in the repository, then run <code>python3 showcase.py check</code>.`);
+    showEmptyChrome();
     return null;
   }
   if (!Array.isArray(manifest.slides) || !manifest.slides.length) {
     setStatus('No slides',
-      `Add images or videos to ${codeText(manifest.content_name || 'the content folder')} and relaunch. <code>python3 showcase.py check</code> lists any file that is not shown and why.`);
+      `Add images or videos to ${folderText(manifest.content_name || 'the content folder')} and relaunch. <code>python3 showcase.py check</code> lists any file that is not shown and why.`);
+    showEmptyChrome();
     return null;
   }
   return manifest.slides;
@@ -413,11 +447,13 @@ function slidesFromManifest(manifest) {
 function showFileProtocolStatus() {
   setStatus('Open with the launcher',
     `Chrome blocks local media over <code>file://</code>. Start it with <strong>${LAUNCHER}</strong> or <code>${CLI}</code>.`);
+  showEmptyChrome();
 }
 
 function showServerDownStatus() {
   setStatus('Server not reachable',
     `Relaunch with <strong>${LAUNCHER}</strong> or <code>${CLI}</code>.`);
+  showEmptyChrome();
 }
 
 // ============================================================
@@ -431,6 +467,12 @@ function showSlide(index) {
   const incoming = $(`layer-${nextKey}`);
   const outgoing = $(`layer-${state.activeLayer}`);
   cleanupLayer(incoming);
+  // Stop the outgoing video now so it cannot advance the show from behind the fade.
+  const outVideo = outgoing.querySelector('video');
+  if (outVideo) {
+    if (outVideo._onEnded) outVideo.removeEventListener('ended', outVideo._onEnded);
+    try { outVideo.pause(); } catch (e) {}
+  }
 
   let media;
   if (slide.kind === 'image') {
@@ -457,7 +499,11 @@ function showSlide(index) {
     media.playsInline = true;
     media.setAttribute('playsinline', '');
     media.addEventListener('loadeddata', hideStatus);
-    media.addEventListener('ended', () => { if (state.mode === 'slideshow') advance(); }, { once: true });
+    // Ignore the event once the viewer has moved on from this slide.
+    media._onEnded = () => {
+      if (state.mode === 'slideshow' && media.isConnected && state.slides[state.currentIndex] === slide) advance();
+    };
+    media.addEventListener('ended', media._onEnded, { once: true });
     media.addEventListener('error', () => onMediaError(slide));
   }
   incoming.appendChild(media);
@@ -488,15 +534,20 @@ function onMediaError(slide) {
 
 function cleanupLayer(layer) {
   const v = layer.querySelector('video');
-  if (v) { try { v.pause(); } catch (e) {} }
+  if (v) {
+    if (v._onEnded) v.removeEventListener('ended', v._onEnded);
+    try { v.pause(); } catch (e) {}
+  }
   layer.innerHTML = '';
 }
 
 function advance() {
+  if (!state.slides.length) return;
   state.currentIndex = (state.currentIndex + 1) % state.slides.length;
   showSlide(state.currentIndex);
 }
 function previous() {
+  if (!state.slides.length) return;
   state.currentIndex = (state.currentIndex - 1 + state.slides.length) % state.slides.length;
   showSlide(state.currentIndex);
 }
@@ -505,10 +556,11 @@ function updateCaption(slide, index) {
   const total = state.slides.length;
   const pad = String(total).length;
   const n = String(index + 1).padStart(pad, '0');
-  $('cap-num').textContent = slide.number || n;
+  const hasNumber = typeof slide.number === 'string' && slide.number !== '';
+  $('cap-num').textContent = hasNumber ? slide.number : n;
   $('cap-chapter').textContent = (slide.chapter || 'VICAR LAB').toUpperCase();
   $('cap-title-id').textContent = slide.title;
-  $('cap-caption').textContent = slide.caption || '(no caption in captions.csv in the content folder for title "' + slide.title + '")';
+  $('cap-caption').textContent = slide.caption || readableTitle(slide.title);
   $('counter').textContent = `${n} / ${total}`;
   $('credit').textContent = slide.credit ? slide.credit : '';
 }
@@ -526,7 +578,9 @@ function startProgress(durationMs) {
 // Grid (chapter-grouped)
 // ============================================================
 function showGrid() {
+  if (!state.slides.length) return;
   state.mode = 'grid';
+  syncControls();
   clearTimeout(state.timer);
   document.querySelectorAll('video').forEach(v => { try { v.pause(); } catch (e) {} });
   $('cap-progress').style.width = '0%';
@@ -549,6 +603,7 @@ function showGrid() {
 
 function startSlideshow() {
   state.mode = 'slideshow';
+  syncControls();
   $('grid').classList.remove('revealed');
   $('grid').classList.add('zoomed-out');
   $('stage').classList.remove('zoomed-out');
@@ -577,7 +632,7 @@ function renderGrid() {
     section.className = 'chapter-section';
     const head = document.createElement('div');
     head.className = 'head';
-    head.innerHTML = `<span class="name">${escapeHtml(key.toUpperCase())}</span><span class="count">· ${items.length} items</span>`;
+    head.innerHTML = `<span class="name">${escapeHtml(key.toUpperCase())}</span><span class="count">· ${items.length} ${items.length === 1 ? 'item' : 'items'}</span>`;
     section.appendChild(head);
 
     const grid = document.createElement('div');
@@ -586,7 +641,7 @@ function renderGrid() {
     items.forEach(({ slide, index }) => {
       const cell = document.createElement('button');
       cell.className = 'cell' + (index === state.currentIndex ? ' current' : '');
-      // Staggered reveal — each cell waits a bit longer than the previous one.
+      // Staggered reveal: each cell waits a bit longer than the previous one.
       cell.style.setProperty('--cell-delay', (cellCounter * 22) + 'ms');
       cellCounter++;
       cell.addEventListener('click', () => {
@@ -596,7 +651,7 @@ function renderGrid() {
 
       const num = document.createElement('span');
       num.className = 'cell-num';
-      num.textContent = slide.number;
+      num.textContent = typeof slide.number === 'string' ? slide.number : '';
       cell.appendChild(num);
 
       const img = document.createElement('img');
@@ -680,6 +735,7 @@ document.addEventListener('keydown', (e) => {
 // Boot
 // ============================================================
 (async function boot() {
+  syncControls();
   if (location.protocol === 'file:') { showFileProtocolStatus(); return; }
   setStatus('Loading', 'Reading the content folder.');
   let manifest;
@@ -693,6 +749,7 @@ document.addEventListener('keydown', (e) => {
   if (!slides) return;
   state.slides = slides;
   setStatus('Loading', `${state.slides.length} slides queued.`);
+  syncControls();
   showSlide(0);
 })();
 </script>

@@ -18,11 +18,14 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
 
+from .common import BYTES_PER_MB
+from .settings import DEFAULT_CAPTIONS_FILE
+
 IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"})
 VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".webm", ".m4v"})
 MEDIA_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
 
-CAPTIONS_MAX_BYTES = 5 * 1024 * 1024
+CAPTIONS_MAX_BYTES = 5 * BYTES_PER_MB
 CONFLICT_MARKER = "conflicted copy"
 IGNORED_NAMES = frozenset({"thumbs.db", "desktop.ini", "icon\r"})
 CAPTION_FIELDS = ("caption", "credit", "chapter")
@@ -31,6 +34,9 @@ NUMBERED_NAME = re.compile(r"^(\d+)[_-](.+)$")
 IMAGE_LIKE = frozenset({".heic", ".heif", ".tif", ".tiff", ".bmp", ".raw", ".cr2", ".dng"})
 VIDEO_LIKE = frozenset({".avi", ".mkv", ".wmv", ".flv", ".mpg", ".mpeg", ".3gp"})
 MAX_LISTED = 12
+THUMB_ROUTE_PREFIX = "_thumbs/"
+THUMB_SUFFIX = ".jpg"
+NOT_UTF8_REASON = "file name is not valid UTF-8; rename it"
 
 
 @dataclass(frozen=True)
@@ -39,7 +45,7 @@ class Slide:
 
     file: str
     kind: str
-    number: Optional[int]
+    number: str  # the prefix text as written in the file name ("05"), or "" when unnumbered
     title: str
     caption: str
     credit: str
@@ -51,7 +57,8 @@ class Slide:
         url = "media/" + quote(self.file, safe="")
         thumb = url
         if self.kind == "video":
-            thumb = "_thumbs/" + quote(Path(self.file).stem, safe="") + ".jpg"
+            # The whole file name, so two videos with the same stem get distinct thumbnails.
+            thumb = THUMB_ROUTE_PREFIX + quote(self.file, safe="") + THUMB_SUFFIX
         return {
             "file": self.file, "url": url, "kind": self.kind, "number": self.number,
             "title": self.title, "caption": self.caption, "credit": self.credit,
@@ -93,22 +100,23 @@ class ContentReport:
         }
 
 
-def parse_media_name(name: str) -> tuple[Optional[int], str]:
+def parse_media_name(name: str) -> tuple[str, str]:
     """Split a file name into its number prefix and its title.
 
     Parameters:
         name: A file name such as "05_reef-survey.mp4".
     Returns:
-        (number or None, title). The title is the name without the number prefix
-        and without the extension.
+        (number text, title). The number text is the prefix exactly as written
+        ("05"), or "" when the name has none. The title is the name without the
+        number prefix and without the extension.
     Example:
-        parse_media_name("05-reef.mp4") -> (5, "reef"); parse_media_name("x.jpg") -> (None, "x")
+        parse_media_name("05-reef.mp4") -> ("05", "reef"); parse_media_name("x.jpg") -> ("", "x")
     """
     stem = name[: len(name) - len(Path(name).suffix)] if Path(name).suffix else name
     match = NUMBERED_NAME.match(stem)
     if match:
-        return int(match.group(1)), match.group(2)
-    return None, stem
+        return match.group(1), match.group(2)
+    return "", stem
 
 
 def _clean_value(text: object) -> str:
@@ -186,7 +194,7 @@ def load_captions(path: Path) -> tuple[dict[str, dict[str, str]], list[str]]:
         return {}, warnings
     try:
         if path.stat().st_size > CAPTIONS_MAX_BYTES:
-            warnings.append(f"{path.name} is over 5 MB and was ignored.")
+            warnings.append(f"{path.name} is over {CAPTIONS_MAX_BYTES // BYTES_PER_MB} MB and was ignored.")
             return {}, warnings
         raw = path.read_bytes()
     except OSError as exc:
@@ -254,24 +262,50 @@ def _unsupported_reason(name: str, suffix: str, captions_file: str) -> str:
     return f"file type {suffix} is not shown; use .jpg, .png, .gif, .webp, .avif, .mp4, .mov, .webm or .m4v"
 
 
-def _classify(folder: Path, real_root: str, name: str, captions_file: str) -> tuple[Optional[Path], Optional[str]]:
-    """Decide whether a folder entry is a slide.
+def _display_name(name: str) -> str:
+    """Return a name that always prints, showing undecodable bytes as \\udcXX escapes."""
+    return name.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
+def _inside(real_root: str, target: str) -> bool:
+    """Return True when `target` is the folder `real_root` or lies inside it.
+
+    Parameters:
+        real_root: The folder's real path.
+        target: A real path to test.
+    Returns:
+        False for a path outside the folder, including a path on another Windows
+        drive (os.path.commonpath raises ValueError there).
+    """
+    try:
+        return os.path.commonpath([real_root, target]) == real_root
+    except ValueError:
+        return False
+
+
+def classify_entry(folder: Path, name: str, captions_file: str = DEFAULT_CAPTIONS_FILE) -> tuple[Optional[Path], Optional[str]]:
+    """Decide whether a top-level entry of the content folder is a slide.
+
+    This is the one rule: the scan uses it to list slides and the server uses it to
+    decide what /media/<name> may serve, so the two always agree.
 
     Parameters:
         folder: The content folder.
-        real_root: Its real path.
-        name: The entry name.
+        name: The entry name (a bare name, not a path).
         captions_file: The one spreadsheet that is used.
     Returns:
-        (path, None) when it is a slide candidate, or (None, reason) when skipped.
+        (path, None) when it is a slide, or (None, reason) when it is not.
     """
-    path = folder / name
+    if _display_name(name) != name:
+        return None, NOT_UTF8_REASON
+    path = Path(folder) / name
+    real_root = os.path.realpath(folder)
     try:
         if path.is_symlink():
             target = os.path.realpath(path)
             if not os.path.exists(target):
                 return None, "link is broken"
-            if os.path.commonpath([real_root, target]) != real_root:
+            if not _inside(real_root, target):
                 return None, "link points outside the content folder"
         if path.is_dir():
             return None, "subfolder; only files at the top level are shown"
@@ -284,16 +318,16 @@ def _classify(folder: Path, real_root: str, name: str, captions_file: str) -> tu
             return None, _unsupported_reason(name, suffix, captions_file)
         if path.stat().st_size == 0:
             return None, "empty file; it may still be syncing"
-    except OSError as exc:
-        return None, f"cannot be read ({exc.strerror or exc})"
+    except (OSError, ValueError) as exc:
+        return None, f"cannot be read ({getattr(exc, 'strerror', None) or exc})"
     return path, None
 
 
 def _slide_order(slide: Slide) -> tuple:
-    """Sort key: numbered slides by number, then unnumbered alphabetically."""
-    if slide.number is None:
+    """Sort key: numbered slides by the number's integer value, then unnumbered alphabetically."""
+    if not slide.number:
         return (1, 0, slide.file.lower(), slide.file)
-    return (0, slide.number, slide.file.lower(), slide.file)
+    return (0, int(slide.number), slide.file.lower(), slide.file)
 
 
 def _build_slide(path: Path, captions: dict[str, dict[str, str]], lowered: dict[str, str]) -> Slide:
@@ -327,8 +361,8 @@ def _cross_check(report: ContentReport, captions: dict[str, dict[str, str]]) -> 
     name = report.captions_path.name
     numbers: dict[int, list[str]] = {}
     for slide in report.slides:
-        if slide.number is not None:
-            numbers.setdefault(slide.number, []).append(slide.file)
+        if slide.number:
+            numbers.setdefault(int(slide.number), []).append(slide.file)
     for number, files in sorted(numbers.items()):
         if len(files) > 1:
             report.warnings.append(f"two slides share the number {number}: {', '.join(files)}")
@@ -344,7 +378,7 @@ def _cross_check(report: ContentReport, captions: dict[str, dict[str, str]]) -> 
         report.warnings.append(f"rows in {name} that name no slide in the folder: {_listing(orphans)}")
 
 
-def scan_content(content_dir: Path, captions_file: str = "captions.csv") -> ContentReport:
+def scan_content(content_dir: Path, captions_file: str = DEFAULT_CAPTIONS_FILE) -> ContentReport:
     """Read a content folder.
 
     Parameters:
@@ -380,22 +414,21 @@ def _scan_entries(report: ContentReport, folder: Path, names: list[str], caption
         names: Entry names in the folder.
         captions_file: Bare name of the captions spreadsheet.
     """
-    real_root = os.path.realpath(folder)
     candidates: list[Path] = []
     for name in names:
         if _is_ignored(name) or name == captions_file:
             continue
         if CONFLICT_MARKER in name.lower() and name.lower().endswith(".csv") and \
                 name.lower().startswith(Path(captions_file).stem.lower()):
-            report.warnings.append(f"a conflicted copy of {captions_file} is present: {name}")
-        path, reason = _classify(folder, real_root, name, captions_file)
+            report.warnings.append(f"a conflicted copy of {captions_file} is present: {_display_name(name)}")
+        path, reason = classify_entry(folder, name, captions_file)
         if path is None:
-            report.skipped.append(Skipped(name, reason or "not shown"))
+            report.skipped.append(Skipped(_display_name(name), reason or "not shown"))
         else:
             candidates.append(path)
     if not report.captions_path.is_file():
         report.warnings.append(f"no captions file: {captions_file} was not found in the folder")
-    captions, warnings = load_captions(report.captions_path)
+    captions, warnings = _read_captions(report, folder)
     report.warnings.extend(warnings)
     lowered: dict[str, str] = {}
     for title in captions:
@@ -409,30 +442,38 @@ def _scan_entries(report: ContentReport, folder: Path, names: list[str], caption
     _cross_check(report, captions)
 
 
-def resolve_media_file(content_dir: Path, name: str) -> Optional[Path]:
-    """Find a media file by bare name, refusing anything outside the folder.
+def _read_captions(report: ContentReport, folder: Path) -> tuple[dict[str, dict[str, str]], list[str]]:
+    """Read the captions file unless it is a link that leaves the content folder.
+
+    Parameters:
+        report: Provides the captions path.
+        folder: The content folder.
+    Returns:
+        (captions, warnings).
+    """
+    path = report.captions_path
+    if path.is_symlink() and not _inside(os.path.realpath(folder), os.path.realpath(path)):
+        return {}, [f"{path.name} is a link that points outside the content folder; it was ignored"]
+    return load_captions(path)
+
+
+def resolve_media_file(content_dir: Path, name: str, captions_file: str = DEFAULT_CAPTIONS_FILE) -> Optional[Path]:
+    """Find a slide file by bare name, refusing anything the scan would not list.
 
     Parameters:
         content_dir: The content folder.
-        name: A bare file name (no separators, not hidden, supported extension).
+        name: A bare file name (no separators, not hidden).
+        captions_file: The one spreadsheet that is used.
     Returns:
-        The file path, or None when the name is unsafe, unsupported, missing, not a
-        regular file, or resolves outside the folder's real path.
+        The file path, or None when the name is unsafe or classify_entry says the
+        entry is not a slide (unsupported type, conflicted copy, empty file, link
+        that leaves the folder, subfolder, missing).
     Example:
         resolve_media_file(folder, "../secret.jpg") -> None
     """
     if not isinstance(name, str) or not name or name in (".", ".."):
         return None
-    if any(ch in name for ch in "/\\\0") or name.startswith((".", "_")):
+    if any(ch in name for ch in "/\\\0") or _is_ignored(name):
         return None
-    if Path(name).suffix.lower() not in MEDIA_EXTENSIONS:
-        return None
-    try:
-        path = Path(content_dir) / name
-        real = os.path.realpath(path)
-        root = os.path.realpath(content_dir)
-        if os.path.commonpath([root, real]) != root or not os.path.isfile(real):
-            return None
-    except (OSError, ValueError):
-        return None
+    path, _reason = classify_entry(Path(content_dir), name, captions_file)
     return path

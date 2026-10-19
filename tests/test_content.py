@@ -4,27 +4,46 @@ Inputs: Temporary content folders.
 Outputs: Test results.
 """
 
+import json
 import os
+import sys
 import unittest
+from unittest import mock
 
 from tests.helpers import CAPTIONS_HEADER, TempDirTestCase, make_content, make_png
 from vicar_showcase.content import (
-    CAPTIONS_MAX_BYTES, MEDIA_EXTENSIONS, VIDEO_EXTENSIONS, load_captions, parse_media_name,
-    resolve_media_file, scan_content,
+    CAPTIONS_MAX_BYTES, MEDIA_EXTENSIONS, NOT_UTF8_REASON, VIDEO_EXTENSIONS, _inside, classify_entry,
+    load_captions, parse_media_name, resolve_media_file, scan_content,
 )
+
+UNDECODABLE_NAME = b"03_caf\xe9.png"
+
+
+def make_undecodable(folder, data=None):
+    """Create a file whose name is not valid UTF-8; return its name, or None when the platform refuses."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        path = os.path.join(os.fsencode(str(folder)), UNDECODABLE_NAME)
+        with open(path, "wb") as handle:
+            handle.write(make_png() if data is None else data)
+    except OSError:
+        return None
+    return os.fsdecode(UNDECODABLE_NAME)
 
 
 class ParseNameTests(unittest.TestCase):
     """parse_media_name."""
 
     def test_forms(self):
-        self.assertEqual(parse_media_name("05_reef.mp4"), (5, "reef"))
-        self.assertEqual(parse_media_name("05-reef.mp4"), (5, "reef"))
-        self.assertEqual(parse_media_name("reef.mp4"), (None, "reef"))
-        self.assertEqual(parse_media_name("a.b.png"), (None, "a.b"))
-        self.assertEqual(parse_media_name("007_x_y.jpg"), (7, "x_y"))
-        self.assertEqual(parse_media_name("05_.jpg"), (None, "05_"))
-        self.assertEqual(parse_media_name("noext"), (None, "noext"))
+        self.assertEqual(parse_media_name("05_reef.mp4"), ("05", "reef"))
+        self.assertEqual(parse_media_name("05-reef.mp4"), ("05", "reef"))
+        self.assertEqual(parse_media_name("reef.mp4"), ("", "reef"))
+        self.assertEqual(parse_media_name("a.b.png"), ("", "a.b"))
+        self.assertEqual(parse_media_name("007_x_y.jpg"), ("007", "x_y"))
+        self.assertEqual(parse_media_name("00_zero.jpg"), ("00", "zero"))
+        self.assertEqual(parse_media_name("05_.jpg"), ("", "05_"))
+        self.assertEqual(parse_media_name("noext"), ("", "noext"))
 
     def test_extension_sets(self):
         self.assertIn(".mov", VIDEO_EXTENSIONS)
@@ -54,7 +73,7 @@ class ScanTests(TempDirTestCase):
         self.assertEqual([s.file for s in r.slides], ["01_alpha.png", "02-beta.png", "10_gamma.png"])
         first = r.slides[0]
         self.assertEqual((first.number, first.title, first.caption, first.credit, first.chapter, first.kind),
-                         (1, "alpha", "First caption", "Credit A", "Intro", "image"))
+                         ("01", "alpha", "First caption", "Credit A", "Intro", "image"))
         self.assertEqual(r.warnings, [])
         self.assertEqual(r.to_json()["content_name"], "c")
 
@@ -64,6 +83,18 @@ class ScanTests(TempDirTestCase):
         r = scan_content(self.c)
         self.assertEqual([s.file for s in r.slides],
                          ["9_x.png", "11_y.png", "100_z.png", "Alpha.png", "beta.png", "zeta.png"])
+
+    def test_number_text_is_kept_and_zero_is_a_number(self):
+        for n in ("100_c.png", "05_b.png", "00_a.png", "plain.png"):
+            self.put(n)
+        r = scan_content(self.c)
+        self.assertEqual([(s.file, s.number) for s in r.slides],
+                         [("00_a.png", "00"), ("05_b.png", "05"), ("100_c.png", "100"), ("plain.png", "")])
+        self.assertEqual([s["number"] for s in r.to_json()["slides"]], ["00", "05", "100", ""])
+
+    def test_zero_padded_duplicates_share_a_number(self):
+        self.put("05_a.png"); self.put("5_b.png")
+        self.assertTrue(any("share the number 5" in w for w in scan_content(self.c).warnings))
 
     def test_two_slides_share_a_number(self):
         self.put("05_a.png"); self.put("05_b.png")
@@ -152,13 +183,49 @@ class ScanTests(TempDirTestCase):
         self.put("1_clip.mp4", b"x")
         j = scan_content(self.c).to_json()["slides"][0]
         self.assertEqual(j["kind"], "video")
-        self.assertEqual(j["thumb"], "_thumbs/1_clip.jpg")
+        self.assertEqual(j["thumb"], "_thumbs/1_clip.mp4.jpg")
         self.assertEqual(j["url"], "media/1_clip.mp4")
+
+    def test_same_stem_videos_get_distinct_thumbnails(self):
+        self.put("20_clip.mp4", b"x"); self.put("20_clip.mov", b"y"); self.put("20_clip.webm", b"z")
+        thumbs = [s["thumb"] for s in scan_content(self.c).to_json()["slides"]]
+        self.assertEqual(len(set(thumbs)), 3)
+        self.assertEqual(sorted(thumbs), ["_thumbs/20_clip.mov.jpg", "_thumbs/20_clip.mp4.jpg",
+                                          "_thumbs/20_clip.webm.jpg"])
 
     def test_image_thumb_is_media_url(self):
         self.put("1_pic.png")
         j = scan_content(self.c).to_json()["slides"][0]
         self.assertEqual(j["thumb"], j["url"])
+
+    def test_undecodable_file_name_is_reported_not_shown(self):
+        name = make_undecodable(self.c)
+        if name is None:
+            self.skipTest("this platform refuses file names that are not valid UTF-8")
+        self.put("01_ok.png")
+        r = scan_content(self.c)
+        self.assertEqual([s.file for s in r.slides], ["01_ok.png"])
+        self.assertEqual(len(r.skipped), 1)
+        self.assertEqual(r.skipped[0].reason, NOT_UTF8_REASON)
+        self.assertIn("rename it", r.skipped[0].reason)
+        r.skipped[0].file.encode("utf-8")  # the reported name always prints
+        json.dumps(r.to_json())
+        self.assertIsNone(resolve_media_file(self.c, name))
+
+    def test_captions_link_outside_the_folder_is_ignored(self):
+        self.put("1_a.png")
+        outside = self.tmp / "outside.csv"
+        outside.write_text(CAPTIONS_HEADER + "a,Leaked,,\n", encoding="utf-8")
+        os.symlink(outside, self.c / "captions.csv")
+        r = scan_content(self.c)
+        self.assertEqual(r.slides[0].caption, "")
+        self.assertTrue(any("link that points outside the content folder" in w for w in r.warnings))
+
+    def test_captions_link_inside_the_folder_is_followed(self):
+        self.put("1_a.png")
+        (self.c / "real.txt").write_text(CAPTIONS_HEADER + "a,Fine,,\n", encoding="utf-8")
+        os.symlink(self.c / "real.txt", self.c / "captions.csv")
+        self.assertEqual(scan_content(self.c).slides[0].caption, "Fine")
 
     def test_no_captions_file_warns(self):
         self.put("1_a.png")
@@ -300,6 +367,36 @@ class ResolveTests(TempDirTestCase):
     def test_directory_with_media_name(self):
         (self.c / "dir.png").mkdir()
         self.assertIsNone(resolve_media_file(self.c, "dir.png"))
+
+    def test_serves_exactly_what_the_scan_lists(self):
+        c = self.c
+        (c / "empty.png").write_bytes(b"")
+        (c / "3_x (conflicted copy).png").write_bytes(make_png())
+        (c / "sub").mkdir()
+        (c / "sub" / "4_in.png").write_bytes(make_png())
+        os.symlink(c / "sub" / "4_in.png", c / "4_link.png")
+        os.symlink(c / "nowhere.png", c / "5_broken.png")
+        (c / "captions.csv").write_text("title\n")
+        (c / "6_ok.mp4").write_bytes(b"v")
+        listed = {s.file for s in scan_content(c).slides}
+        for name in sorted(os.listdir(c)):
+            self.assertEqual(resolve_media_file(c, name) is not None, name in listed, name)
+        self.assertNotIn("empty.png", listed)
+        self.assertNotIn("3_x (conflicted copy).png", listed)
+
+    def test_empty_and_conflicted_files_are_refused(self):
+        (self.c / "7_empty.png").write_bytes(b"")
+        (self.c / "8_a (Lauren's conflicted copy 2026-01-01).png").write_bytes(make_png())
+        self.assertIsNone(resolve_media_file(self.c, "7_empty.png"))
+        self.assertIsNone(resolve_media_file(self.c, "8_a (Lauren's conflicted copy 2026-01-01).png"))
+
+    def test_classify_entry_reasons(self):
+        self.assertEqual(classify_entry(self.c, "1_a.png"), (self.c / "1_a.png", None))
+        self.assertEqual(classify_entry(self.c, "2_link.png")[1], "link points outside the content folder")
+
+    def test_paths_on_another_drive_count_as_outside(self):
+        with mock.patch("vicar_showcase.content.os.path.commonpath", side_effect=ValueError("different drives")):
+            self.assertFalse(_inside("C:\\content", "D:\\elsewhere"))
 
     def test_uppercase_extension(self):
         (self.c / "3_X.PNG").write_bytes(make_png())

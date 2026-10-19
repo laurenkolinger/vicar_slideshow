@@ -4,6 +4,13 @@ Purpose: Copy the slides and the captions file from one folder to another, verif
 Inputs: A source folder, an existing destination folder, an optional captions file path.
 Outputs: Verified copies in the destination, a CSV log (_showcase_copy_log.csv) there,
     and moved-aside old versions under _superseded/<stamp>/ when replacing.
+
+Placing a file never overwrites one that appeared after planning: the verified temporary
+copy is hard-linked to its final name (os.link fails if the name exists, also on a
+case-insensitive folder where a.jpg and A.jpg are the same name). Where hard links are not
+supported (some network and exFAT folders) an exclusive create (O_CREAT | O_EXCL) of the
+final name guards the move; a file created in the instant between that check and the
+move is the one case the fallback cannot see.
 """
 
 from __future__ import annotations
@@ -12,6 +19,8 @@ import csv
 import getpass
 import hashlib
 import io
+import itertools
+import logging
 import os
 import shutil
 import threading
@@ -20,7 +29,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
+from .common import BYTES_PER_MB, EXIT_FAILED, EXIT_NO_CONTENT, EXIT_REFUSED
 from .content import scan_content
+from .settings import DEFAULT_CAPTIONS_FILE
+
+try:
+    import fcntl
+except ImportError:  # Windows has no fcntl
+    fcntl = None
 
 LOG_NAME = "_showcase_copy_log.csv"
 SUPERSEDED_DIR = "_superseded"
@@ -28,23 +44,30 @@ LOG_COLUMNS = ("timestamp", "action", "file", "bytes", "sha256", "source_dir", "
 SPACE_MARGIN = 1.05
 CHUNK_BYTES = 1024 * 1024
 AST_OFFSET_HOURS = -4
-EXIT_MISSING_FOLDER = 2
-EXIT_REFUSED = 3
-EXIT_FAILED = 4
+PARTIAL_PREFIX = ".showcase-"  # short on purpose: a long file name must not overflow the 255-byte limit
+PARTIAL_SUFFIX = ".partial"
 
 _LOG_LOCK = threading.Lock()
+_PARTIAL_COUNTER = itertools.count(1)
+_LOGGER = logging.getLogger(__name__)
 
 ACTION_COPIED = "copied"
 ACTION_PRESENT = "already there"
 ACTION_REPLACED = "replaced"
 ACTION_SKIPPED = "skipped"
 ACTION_FAILED = "failed"
+ACTION_CONFLICT = "conflict"
+
+
+class PlacementConflict(Exception):
+    """The final name already exists, so the file was not placed."""
 
 
 class CopyError(Exception):
     """A copy that cannot start or finish; `exit_code` is the process exit code."""
 
     def __init__(self, message: str, exit_code: int) -> None:
+        """Keep the message and the exit code the command line should return."""
         super().__init__(message)
         self.exit_code = exit_code
 
@@ -90,6 +113,7 @@ class CopyResult:
     replaced: int = 0
     skipped: int = 0
     failed: int = 0
+    conflicts: int = 0
     failures: list[str] = field(default_factory=list)
 
 
@@ -132,7 +156,7 @@ def _check_folders(source: Path, dest: Path) -> None:
     for label, folder in (("source", source), ("destination", dest)):
         if not folder.is_dir():
             note = " (the destination is never created; make it first)" if label == "destination" else ""
-            raise CopyError(f"{label} folder not found or not a folder: {folder}{note}", EXIT_MISSING_FOLDER)
+            raise CopyError(f"{label} folder not found or not a folder: {folder}{note}", EXIT_NO_CONTENT)
     a, b = _real(source), _real(dest)
     if a == b or a in b.parents or b in a.parents:
         raise CopyError(
@@ -153,7 +177,7 @@ def plan_copy(
     source_dir: Path,
     dest_dir: Path,
     captions_path: Optional[Path] = None,
-    captions_file: str = "captions.csv",
+    captions_file: str = DEFAULT_CAPTIONS_FILE,
     replace: bool = False,
 ) -> CopyPlan:
     """Decide what a copy will do, without writing anything.
@@ -169,13 +193,16 @@ def plan_copy(
     Returns:
         The CopyPlan: items (copy, present or conflict), skipped files, warnings.
     Raises:
-        CopyError: A folder is missing, one holds the other, or free space is too small.
+        CopyError: A folder is missing, `captions_path` is given but is not a file,
+            one folder holds the other, or free space is too small.
     """
     source, dest = Path(source_dir), Path(dest_dir)
     _check_folders(source, dest)
+    if captions_path is not None and not Path(captions_path).is_file():
+        raise CopyError(f"captions file not found or not a file: {captions_path}", EXIT_NO_CONTENT)
     report = scan_content(source, captions_file)
     if report.error:
-        raise CopyError(report.error, EXIT_MISSING_FOLDER)
+        raise CopyError(report.error, EXIT_NO_CONTENT)
     plan = CopyPlan(source, dest, replace, skipped=[(s.file, s.reason) for s in report.skipped])
     for slide in report.slides:
         plan.items.append(_plan_item(source / slide.file, dest, slide.file, slide.size_bytes))
@@ -217,8 +244,8 @@ def _check_space(plan: CopyPlan) -> None:
     free = shutil.disk_usage(plan.dest_dir).free
     if free < need:
         raise CopyError(
-            f"not enough free space in {plan.dest_dir}: need {need / 1e6:.0f} MB "
-            f"(copy plus 5 percent margin), free {free / 1e6:.0f} MB",
+            f"not enough free space in {plan.dest_dir}: need {need / BYTES_PER_MB:.0f} MB "
+            f"(copy plus {round((SPACE_MARGIN - 1) * 100)} percent margin), free {free / BYTES_PER_MB:.0f} MB",
             EXIT_REFUSED,
         )
 
@@ -236,10 +263,10 @@ def describe_plan(plan: CopyPlan) -> list[str]:
         verb = {"copy": "will copy", "present": "already there", "conflict": "DIFFERS in destination"}[item.status]
         if item.status == "conflict" and plan.replace:
             verb = "will replace (old one moved to _superseded)"
-        lines.append(f"  {verb}: {item.name} ({item.size / 1e6:.1f} MB)")
+        lines.append(f"  {verb}: {item.name} ({item.size / BYTES_PER_MB:.1f} MB)")
     lines.extend(f"  not copied: {name} ({reason})" for name, reason in plan.skipped)
     lines.extend(f"  warning: {w}" for w in plan.warnings)
-    lines.append(f"  total to write: {plan.bytes_to_copy / 1e6:.1f} MB")
+    lines.append(f"  total to write: {plan.bytes_to_copy / BYTES_PER_MB:.1f} MB")
     return lines
 
 
@@ -262,7 +289,7 @@ class CopyLog:
         """Append one row.
 
         Parameters:
-            action: copied, already there, replaced, skipped or failed.
+            action: copied, already there, replaced, skipped, conflict or failed.
             file: The file name.
             size: Size in bytes.
             sha: SHA-256 hex digest, or empty.
@@ -291,9 +318,7 @@ def _lock_file(handle) -> None:
     Parameters:
         handle: The open log file; the lock is released when it closes.
     """
-    try:
-        import fcntl
-    except ImportError:
+    if fcntl is None:
         # Windows has no fcntl; the in-process lock still orders this tool's own threads.
         return
     fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
@@ -323,6 +348,8 @@ def _copy_hashing(src: Path, partial: Path) -> str:
 def _supersede(dest: Path, name: str, stamp: str) -> None:
     """Move an existing destination file to _superseded/<stamp>/ (never deleted).
 
+    A file that has already vanished needs no moving.
+
     Parameters:
         dest: Destination folder.
         name: File name to move aside.
@@ -336,11 +363,56 @@ def _supersede(dest: Path, name: str, stamp: str) -> None:
     while os.path.lexists(target):
         n += 1
         target = folder / f"{name}.{n}"
-    os.replace(dest / name, target)
+    try:
+        os.replace(dest / name, target)
+    except FileNotFoundError:
+        # Removed by someone else since planning: nothing to set aside.
+        return
+
+
+def _partial_path(dest: Path) -> Path:
+    """Return a short, unique temporary name inside the destination folder."""
+    return dest / f"{PARTIAL_PREFIX}{os.getpid()}-{next(_PARTIAL_COUNTER)}{PARTIAL_SUFFIX}"
+
+
+def _publish_without_overwrite(partial: Path, final: Path) -> None:
+    """Give a verified temporary file its final name, never replacing an existing file.
+
+    Parameters:
+        partial: The verified temporary file.
+        final: The name to publish under.
+    Raises:
+        PlacementConflict: `final` already exists (any case variant on a case-insensitive folder).
+        OSError: A file operation failed.
+    """
+    try:
+        os.link(partial, final)
+        return
+    except FileExistsError as exc:
+        raise PlacementConflict(f"{final.name} appeared in the destination during the copy") from exc
+    except (OSError, NotImplementedError, AttributeError):
+        # Hard links are not supported here: use the exclusive-create guard below.
+        pass
+    try:
+        os.close(os.open(final, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
+    except FileExistsError as exc:
+        raise PlacementConflict(f"{final.name} appeared in the destination during the copy") from exc
+    os.replace(partial, final)
+
+
+def _remove_partial(partial: Path) -> None:
+    """Remove a temporary file; a failure is logged and never replaces the real result."""
+    try:
+        partial.unlink()
+    except FileNotFoundError:
+        # Already gone (never created, or moved into place): nothing to clean.
+        pass
+    except OSError as exc:
+        _LOGGER.warning("could not remove the temporary file %s: %s", partial, exc)
 
 
 def _place_one(item: PlanItem, plan: CopyPlan, stamp: str) -> tuple[str, str]:
-    """Copy one file through a partial name, verify it, and move it into place.
+    """Copy one file through a temporary name, verify it, and publish it without clobbering.
 
     Parameters:
         item: The item to place.
@@ -349,11 +421,12 @@ def _place_one(item: PlanItem, plan: CopyPlan, stamp: str) -> tuple[str, str]:
     Returns:
         (action, sha256) where action is copied or replaced.
     Raises:
+        PlacementConflict: The final name exists now (it appeared after planning).
         OSError: A file operation failed.
         ValueError: The written file does not match the source hash.
     """
     final = plan.dest_dir / item.name
-    partial = plan.dest_dir / f".{item.name}.{os.getpid()}.partial"
+    partial = _partial_path(plan.dest_dir)
     try:
         digest = _copy_hashing(item.source, partial)
         if sha256_file(partial) != digest:
@@ -362,14 +435,10 @@ def _place_one(item: PlanItem, plan: CopyPlan, stamp: str) -> tuple[str, str]:
         if item.status == "conflict":
             _supersede(plan.dest_dir, item.name, stamp)
             action = ACTION_REPLACED
-        os.replace(partial, final)
+        _publish_without_overwrite(partial, final)
         return action, digest
     finally:
-        try:
-            partial.unlink()
-        except FileNotFoundError:
-            # The partial was moved into place (or never created); only our own is ever removed.
-            pass
+        _remove_partial(partial)
 
 
 def _refuse_conflicts(plan: CopyPlan) -> None:
@@ -397,9 +466,11 @@ def execute_plan(plan: CopyPlan, run_by: Optional[str] = None, out: Callable[[st
         run_by: Account name for the log (default: the signed-in user).
         out: Prints progress lines.
     Returns:
-        The CopyResult counts (failures list the files that failed).
+        The CopyResult counts (failures list the files that failed or conflicted).
     Raises:
         CopyError: Conflicts without replace (nothing is copied), or the log is unwritable.
+        (A file that appears in the destination after planning is counted in
+        `conflicts` and left alone; the caller exits 3.)
     """
     _refuse_conflicts(plan)
     log = CopyLog(plan.dest_dir, plan.source_dir, run_by or getpass.getuser())
@@ -411,6 +482,30 @@ def execute_plan(plan: CopyPlan, run_by: Optional[str] = None, out: Callable[[st
     for item in plan.items:
         _execute_item(item, plan, log, result, stamp, out)
     return result
+
+
+def _record_present(item: PlanItem, plan: CopyPlan, log: CopyLog, result: CopyResult,
+                    out: Callable[[str], None]) -> None:
+    """Log a file that was already in the destination, or count it failed if it vanished.
+
+    Parameters:
+        item: The item planned as present.
+        plan: The plan.
+        log: The copy log.
+        result: Counts, updated in place.
+        out: Prints a progress line.
+    """
+    try:
+        digest = sha256_file(plan.dest_dir / item.name)
+    except OSError as exc:
+        log.write(ACTION_FAILED, item.name, item.size)
+        result.failed += 1
+        result.failures.append(f"{item.name}: it was in the destination at planning but cannot be read now ({exc})")
+        out(f"  FAILED: {item.name}: it was in the destination at planning but cannot be read now ({exc})")
+        return
+    log.write(ACTION_PRESENT, item.name, item.size, digest)
+    result.present += 1
+    out(f"  already there: {item.name}")
 
 
 def _execute_item(item: PlanItem, plan: CopyPlan, log: CopyLog, result: CopyResult, stamp: str,
@@ -426,12 +521,16 @@ def _execute_item(item: PlanItem, plan: CopyPlan, log: CopyLog, result: CopyResu
         out: Prints a progress line.
     """
     if item.status == "present":
-        log.write(ACTION_PRESENT, item.name, item.size, sha256_file(plan.dest_dir / item.name))
-        result.present += 1
-        out(f"  already there: {item.name}")
+        _record_present(item, plan, log, result, out)
         return
     try:
         action, digest = _place_one(item, plan, stamp)
+    except PlacementConflict as exc:
+        log.write(ACTION_CONFLICT, item.name, item.size)
+        result.conflicts += 1
+        result.failures.append(f"{item.name}: {exc}; it was left as it is")
+        out(f"  CONFLICT: {item.name}: {exc}; it was left as it is")
+        return
     except (OSError, ValueError) as exc:
         log.write(ACTION_FAILED, item.name, item.size)
         result.failed += 1
@@ -443,4 +542,4 @@ def _execute_item(item: PlanItem, plan: CopyPlan, log: CopyLog, result: CopyResu
         result.replaced += 1
     else:
         result.copied += 1
-    out(f"  {action}: {item.name} ({item.size / 1e6:.1f} MB, verified)")
+    out(f"  {action}: {item.name} ({item.size / BYTES_PER_MB:.1f} MB, verified)")

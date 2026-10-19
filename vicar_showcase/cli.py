@@ -3,7 +3,7 @@ Purpose: The command line: screensaver, slideshow, serve, check, copy-content, m
 Inputs: Command-line arguments, settings files, the environment.
 Outputs: Text or JSON on stdout, errors on stderr as "showcase: error: <message>",
     and an exit code: 0 ok, 1 settings or usage error, 2 content folder missing,
-    3 copy refused, 4 copy failed.
+    3 copy refused (or a file appeared in the destination during the copy), 4 copy failed.
 """
 
 from __future__ import annotations
@@ -15,19 +15,16 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from . import __version__
+from .common import BYTES_PER_MB, EXIT_FAILED, EXIT_NO_CONTENT, EXIT_OK, EXIT_REFUSED, EXIT_USAGE
 from .content import MEDIA_EXTENSIONS, ContentReport, scan_content
-from .copy_content import CopyError, describe_plan, execute_plan, plan_copy, EXIT_FAILED
+from .copy_content import CopyError, describe_plan, execute_plan, plan_copy
 from .launch import run_view
 from .server import ServerState, run_server
 from .settings import VIEW_PORTS, VIEWS, Settings, SettingsError, load_settings
 from .thumbs import cached_thumb, default_thumbs_dir, make_all_thumbs
 
 REPO_DIR = Path(__file__).resolve().parent.parent
-EXIT_OK = 0
-EXIT_USAGE = 1
-EXIT_NO_CONTENT = 2
 MIN_PORT, MAX_PORT = 1, 65535
-BYTES_PER_MB = 1_000_000
 
 
 class ShowcaseParser(argparse.ArgumentParser):
@@ -134,11 +131,14 @@ def check_text(settings: Settings, report: ContentReport) -> str:
     videos = sum(1 for s in report.slides if s.kind == "video")
     megabytes = sum(s.size_bytes for s in report.slides) / BYTES_PER_MB
     lines += [f"Videos: {videos}", f"Images: {len(report.slides) - videos}",
-              f"Slides: {len(report.slides)} ({megabytes:.1f} MB)", "", "Slides:"]
+              f"Slides: {len(report.slides)} ({megabytes:.1f} MB)", ""]
+    lines.append("Slides:")
     for slide in report.slides:
-        number = f"{slide.number:>3}" if slide.number is not None else "  -"
+        number = f"{slide.number:>3}" if slide.number else "  -"
         caption = "caption" if slide.caption else "NO CAPTION"
         lines.append(f"  {number}  {slide.title}  [{slide.kind}, {caption}]")
+    if not report.slides:
+        lines.append("  none")
     lines += ["", "Not shown:"] + ([f"  {s.file}: {s.reason}" for s in report.skipped] or ["  none"])
     lines += ["", "Warnings:"] + ([f"  {w}" for w in report.warnings] or ["  none"])
     return "\n".join(lines)
@@ -190,7 +190,7 @@ def cmd_make_thumbs(settings: Settings, args: argparse.Namespace) -> int:
         return EXIT_NO_CONTENT
     counts = make_all_thumbs(report, default_thumbs_dir(settings.repo_dir))
     if counts["ffmpeg_missing"]:
-        print("ffmpeg is not installed; no thumbnails were made. The pages show the video itself instead.")
+        print("ffmpeg is not installed; no thumbnails were made. The slideshow grid shows an empty cell for each video.")
     print(f"Videos: {counts['videos']}; already cached: {counts['cached']}; "
           f"made: {counts['made']}; failed: {counts['failed']}")
     print("Step 1 complete: thumbnails")
@@ -219,15 +219,21 @@ def cmd_copy(settings: Settings, args: argparse.Namespace) -> int:
     except CopyError as exc:
         print(f"showcase: error: {exc}", file=sys.stderr)
         return exc.exit_code
-    print("Step 2 complete: files copied and verified")
+    if result.failed or result.conflicts:
+        print(f"Step 2 incomplete: {result.failed} file(s) failed, {result.conflicts} left alone because "
+              f"the name appeared in the destination during the copy")
+    else:
+        print("Step 2 complete: files copied and verified")
     print(f"Copied: {result.copied}; replaced: {result.replaced}; already there: {result.present}; "
-          f"not copied: {result.skipped}; failed: {result.failed}")
+          f"not copied: {result.skipped}; failed: {result.failed}; conflicts: {result.conflicts}")
     print(f"Slides shown: source {_count_slides(source, settings.captions_file)}, "
           f"destination {_count_slides(dest, settings.captions_file)}")
     print("Step 3 complete: destination re-scanned")
     for failure in result.failures:
         print(f"showcase: error: {failure}", file=sys.stderr)
-    return EXIT_FAILED if result.failed else EXIT_OK
+    if result.failed:
+        return EXIT_FAILED
+    return EXIT_REFUSED if result.conflicts else EXIT_OK
 
 
 COMMANDS = {

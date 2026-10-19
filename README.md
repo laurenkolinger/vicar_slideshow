@@ -43,7 +43,7 @@ The content folder is a plain folder of images, videos and one `captions.csv`. T
 }
 ```
 
-- `content_dir` is the folder with the slides. A leading `~` means your home folder. A relative path is read from the repository folder.
+- `content_dir` is the folder with the slides. A leading `~` means your home folder. A relative path is read from the repository folder. The same holds for `--content` and `VICAR_SHOWCASE_CONTENT`. The paths you give to `copy-content` (`--from`, `--to`, `--captions`) are different: a relative one is read from the folder your terminal is in.
 - `captions_file` is the captions spreadsheet inside that folder. It must be a bare file name ending in `.csv`. Leave it as `captions.csv`.
 - JSON has no comments, so this section is the documentation. An unknown key stops the tool and lists the known keys, so a typo never falls back silently.
 - In a fork, edit `content_dir` in `settings.json` and commit it. On one computer, copy the file to `settings.local.json` and edit the copy.
@@ -71,10 +71,11 @@ Anyone who adds to the shared folder follows these rules.
 
 **Supported files.** Images: `.jpg` `.jpeg` `.png` `.gif` `.webp` `.avif`. Videos: `.mp4` `.mov` `.webm` `.m4v`. Put them directly in the folder, not in subfolders.
 
-**Order.** Start a file name with a number and a separator to set its place: `05_reef-survey.mp4` or `05-reef-survey.mp4`. Slides play in number order, counting the number as an integer (`2_` before `10_`). Files without a number play after the numbered ones, in alphabetical order.
+**Order.** Start a file name with a number and a separator to set its place: `05_reef-survey.mp4` or `05-reef-survey.mp4`. Slides play in number order, counting the number as an integer (`2_` before `10_`, and `00_` is the first slide). The pages show the number as you wrote it (`05`, not `5`). Files without a number play after the numbered ones, in alphabetical order.
 
 **Never shown.** The tool skips these and `check` reports each one with its reason:
 
+- file names that are not valid UTF-8 (rename them)
 - subfolders and their contents
 - unsupported file types, for example iPhone `.heic` photos (export them as `.jpg` first)
 - Dropbox conflicted copies (a name containing `conflicted copy`): open both versions, keep the right one, delete the other
@@ -101,6 +102,7 @@ grouper-spawning,"Grouper gather in large groups to spawn south of St. Thomas.",
 - If a title appears twice, the first row wins and `check` warns.
 - Save from Excel or Numbers as CSV UTF-8. Windows-1252 is accepted with a warning. A cell may contain line breaks.
 - Do not keep two captions files. A Dropbox conflicted copy of `captions.csv` is reported by `check`.
+- A `captions.csv` that is a link pointing outside the folder is ignored, with a warning.
 
 `example_content/` in this repository shows the layout: two numbered images with caption rows and one unnumbered image.
 
@@ -110,12 +112,13 @@ grouper-spawning,"Grouper gather in large groups to spawn south of St. Thomas.",
 
 - It checks every file against the rules above, and checks free space before it starts.
 - It verifies each copy with a SHA-256 checksum.
-- It never overwrites a different file. If any destination file already exists with different content, the whole run is refused (exit code 3) and nothing is copied.
+- It never overwrites a different file. If any destination file already exists with different content, the whole run is refused (exit code 3) and nothing is copied. A file that appears in the destination while the copy runs (another person's sync, or a name that differs only in upper and lower case on a case-insensitive disk) is left as it is and logged as a conflict; the rest are copied and the command exits with code 3 at the end.
+- A file that is in the destination when the plan is made and gone before it is checked is logged as failed (exit code 4).
 - `--replace` allows replacing. The old file moves to `_superseded/<YYYYMMDD-HHMMSS>/` inside the destination. Nothing is deleted.
 - `--dry-run` shows what would happen and writes nothing.
 - Every action is appended to `_showcase_copy_log.csv` in the destination.
 
-The destination is the content folder from your settings, or the existing folder given with `--to <folder>`. The first copy from this lab workstation's old local folder, run from the repository's top folder:
+The destination is the content folder from your settings, or the folder given with `--to <folder>`. It must already exist: the tool never creates it. A `--captions` path that is not a file stops the command with exit code 2 before anything is copied. The first copy from this lab workstation's old local folder, run from the repository's top folder:
 
 ```bash
 python3 showcase.py copy-content --from slideshow/slideshow_media --captions slideshow/captions.csv
@@ -147,14 +150,16 @@ Run every command from the repository's top folder as `python3 showcase.py <comm
 
 | Command | What it does |
 |---|---|
-| `screensaver [--port <port>]` | Starts the screensaver server on port 8766 (or reuses it) and opens the page full screen in Chrome or Chromium; closing the page stops the server |
-| `slideshow [--port <port>]` | Starts the slideshow server on port 8765 (or reuses it) and opens the page in the default browser; Ctrl+C stops the server |
+| `screensaver [--port <port>]` | Starts the screensaver server on port 8766 (or reuses the one already running) and opens the page full screen in Chrome, Chromium or, on Windows, Edge. Closing that window stops a server this command started. With no such browser it tries Firefox in kiosk mode, then the default browser; the default browser cannot be watched, so then press Ctrl+C in the terminal to stop. |
+| `slideshow [--port <port>]` | Starts the slideshow server on port 8765 (or reuses the one already running) and opens the page in the default browser. Ctrl+C stops a server this command started. |
 | `serve --view <screensaver\|slideshow> --port <port>` | Runs one view's server in the foreground without opening a browser. VICARIUS starts views this way. |
 | `check [--json]` | Reads the content folder and prints the slides, skipped files and warnings. `--json` prints the report for programs. |
 | `copy-content --from <folder> [--to <folder>] [--captions <file>] [--replace] [--dry-run]` | Copies slides and captions into the content folder, as described above |
 | `make-thumbs` | Makes preview pictures for videos with `ffmpeg`, in `.cache/thumbs/` |
 
 `--content <folder>` works on any command and overrides every setting.
+
+When the launcher reuses a server that is already running, that server belongs to the window that started it. Ctrl+C or closing the browser in the second window only ends the second launcher; the first window's server keeps running. If the browser cannot be started, the launcher prints why and exits with code 1.
 
 When a view's port is already in use, the launcher asks the program on it. If it is this tool serving the same content folder, the launcher reuses it. If it is this tool serving another folder, or any other program, the launcher stops with a message naming the port and what to do.
 
@@ -163,9 +168,9 @@ When a view's port is already in use, the launcher asks the program on it. If it
 | Code | Meaning |
 |---|---|
 | 0 | Done |
-| 1 | Settings or usage error (for example an unknown settings key or a bad option) |
-| 2 | The content folder does not exist or cannot be read (for `copy-content`: the `--from` or `--to` folder) |
-| 3 | Copy refused: conflicting files already exist, not enough free space, or one folder is inside the other |
+| 1 | Settings or usage error (for example an unknown settings key or a bad option), a view port held by another program or by a server for another folder, or `serve` failing to bind its port |
+| 2 | The content folder does not exist or cannot be read (for `copy-content`: the `--from` or `--to` folder, which is never created, or a `--captions` path that is not a file). `serve` never exits with 2. |
+| 3 | Copy refused: conflicting files already exist, not enough free space, or one folder is inside the other; also a file that appeared in the destination during the copy |
 | 4 | Copy failed (see `_showcase_copy_log.csv`) |
 
 ## How it works inside

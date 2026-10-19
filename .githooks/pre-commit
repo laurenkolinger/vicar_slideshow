@@ -13,7 +13,9 @@ max_bytes=$((95 * 1024 * 1024))     # 95 MB, just under GitHub's 100 MB ceiling
 max_media_bytes=$((2 * 1024 * 1024)) # 2 MB cap for any image or video
 blocked=""
 
-while IFS= read -r f; do
+# NUL-separated names with quotePath off: a non-ASCII name arrives as written, so the
+# size check below finds the file. Works on bash 3.2 (the stock macOS shell).
+while IFS= read -r -d '' f; do
     [ -z "$f" ] && continue
     case "$f" in
         slideshow/slideshow_media/*|*/slideshow_media/*|slideshow/_thumbs/*|*/_thumbs/*|.cache/*|*/.cache/*)
@@ -28,7 +30,7 @@ while IFS= read -r f; do
         if [ "$size" -gt "$max_bytes" ]; then
             blocked+="  [over 95 MB] $f ($((size / 1024 / 1024)) MB)"$'\n'
         fi
-        lower="${f,,}"
+        lower=$(printf '%s' "$f" | tr '[:upper:]' '[:lower:]')
         case "$lower" in
             *.jpg|*.jpeg|*.png|*.gif|*.webp|*.avif|*.heic|*.mp4|*.mov|*.webm|*.m4v)
                 if [ "$size" -gt "$max_media_bytes" ]; then
@@ -36,7 +38,7 @@ while IFS= read -r f; do
                 fi ;;
         esac
     fi
-done < <(git diff --cached --name-only --diff-filter=ACM)
+done < <(git -c core.quotePath=false diff --cached --name-only -z --diff-filter=ACMR)
 
 if [ -n "$blocked" ]; then
     echo "pre-commit blocked: content and heavy files must not be committed:" >&2

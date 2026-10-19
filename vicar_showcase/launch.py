@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -23,14 +24,13 @@ import webbrowser
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
+from .common import COMMAND_TIMEOUT_SECONDS, EXIT_OK, EXIT_USAGE, LOOPBACK_HOST
 from .server import APP_NAME
 from .settings import SOURCE_ENV, SOURCE_FLAG, Settings
 
-HOST = "127.0.0.1"
 PROBE_TIMEOUT_SECONDS = 1.0
 SERVER_WAIT_SECONDS = 3.0
 SERVER_POLL_SECONDS = 0.1
-CHILD_STOP_SECONDS = 5
 WINDOW_TITLE = "VICAR Lab"
 WINDOW_POLLS = 40
 WINDOW_POLL_SECONDS = 0.25
@@ -42,7 +42,13 @@ MAC_CHROME_PATHS = (
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "/Applications/Chromium.app/Contents/MacOS/Chromium",
 )
-WINDOWS_CHROME_PARTS = (r"Google\Chrome\Application\chrome.exe", r"Chromium\Application\chrome.exe")
+# The same apps installed for one user only; "~" is expanded when the browser is looked for.
+MAC_USER_CHROME_PATHS = tuple(path.replace("/Applications/", "~/Applications/", 1) for path in MAC_CHROME_PATHS)
+WINDOWS_CHROME_PARTS = (
+    r"Google\Chrome\Application\chrome.exe",
+    r"Chromium\Application\chrome.exe",
+    r"Microsoft\Edge\Application\msedge.exe",
+)
 WINDOWS_ENV_ROOTS = ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA")
 CHROME_KIOSK_FLAGS = (
     "--kiosk", "--noerrdialogs", "--disable-infobars", "--disable-session-crashed-bubble",
@@ -61,7 +67,6 @@ class Runner:
 
     def which(self, name: str) -> Optional[str]:
         """Return the full path of a program on PATH, or None."""
-        import shutil
         return shutil.which(name)
 
     def exists(self, path: str) -> bool:
@@ -79,6 +84,20 @@ class Runner:
         except (OSError, subprocess.SubprocessError):
             # Program missing or hung: callers treat None as "not available".
             return None
+
+    def run_foreground(self, args: Sequence[str]) -> subprocess.CompletedProcess:
+        """Run a program (the browser) until it exits, discarding its output.
+
+        Output goes to the null device, not to memory: a kiosk browser runs for days
+        and writes all the time.
+
+        Returns:
+            The CompletedProcess.
+        Raises:
+            OSError: The program could not be started.
+        """
+        return subprocess.run(list(args), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, check=False)
 
     def popen(self, args: Sequence[str], **kwargs) -> subprocess.Popen:
         """Start a program in the background."""
@@ -102,7 +121,7 @@ def probe_existing(port: int, timeout: float = PROBE_TIMEOUT_SECONDS) -> Optiona
     Returns:
         The /_showcase_info.json object, or None when nothing (or another program) answers.
     """
-    url = f"http://{HOST}:{port}/_showcase_info.json"
+    url = f"http://{LOOPBACK_HOST}:{port}/_showcase_info.json"
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:
             data = json.loads(response.read(65536).decode("utf-8"))
@@ -115,14 +134,14 @@ def probe_existing(port: int, timeout: float = PROBE_TIMEOUT_SECONDS) -> Optiona
 def port_in_use(port: int, timeout: float = PROBE_TIMEOUT_SECONDS) -> bool:
     """Return True when something accepts connections on 127.0.0.1:port."""
     try:
-        with socket.create_connection((HOST, port), timeout=timeout):
+        with socket.create_connection((LOOPBACK_HOST, port), timeout=timeout):
             return True
     except OSError:
         return False
 
 
 def detect_browser(platform: str, runner: Runner, environ: Optional[dict] = None) -> Optional[str]:
-    """Find a Chrome or Chromium executable.
+    """Find a Chrome, Chromium (or, on Windows, Edge) executable.
 
     Parameters:
         platform: sys.platform value.
@@ -137,7 +156,8 @@ def detect_browser(platform: str, runner: Runner, environ: Optional[dict] = None
             if runner.which(name):
                 return name
     elif platform == "darwin":
-        return next((p for p in MAC_CHROME_PATHS if runner.exists(p)), None)
+        candidates = [os.path.expanduser(p) for p in MAC_CHROME_PATHS + MAC_USER_CHROME_PATHS]
+        return next((p for p in candidates if runner.exists(p)), None)
     elif platform.startswith("win"):
         for var in WINDOWS_ENV_ROOTS:
             for part in WINDOWS_CHROME_PARTS:
@@ -196,19 +216,19 @@ class DockToggle:
         """Set dock-fixed to false, remembering the old value (when the setting exists)."""
         if not self.active:
             return
-        writable = self.runner.run(["gsettings", "writable", DOCK_SCHEMA, DOCK_KEY], timeout=5)
+        writable = self.runner.run(["gsettings", "writable", DOCK_SCHEMA, DOCK_KEY], timeout=COMMAND_TIMEOUT_SECONDS)
         if writable is None or writable.returncode != 0:
             return
-        current = self.runner.run(["gsettings", "get", DOCK_SCHEMA, DOCK_KEY], timeout=5)
+        current = self.runner.run(["gsettings", "get", DOCK_SCHEMA, DOCK_KEY], timeout=COMMAND_TIMEOUT_SECONDS)
         if current is None or current.returncode != 0 or not current.stdout.strip():
             return
         self.previous = current.stdout.strip()
-        self.runner.run(["gsettings", "set", DOCK_SCHEMA, DOCK_KEY, "false"], timeout=5)
+        self.runner.run(["gsettings", "set", DOCK_SCHEMA, DOCK_KEY, "false"], timeout=COMMAND_TIMEOUT_SECONDS)
 
     def restore(self) -> None:
         """Put dock-fixed back to its earlier value."""
         if self.active and self.previous:
-            self.runner.run(["gsettings", "set", DOCK_SCHEMA, DOCK_KEY, self.previous], timeout=5)
+            self.runner.run(["gsettings", "set", DOCK_SCHEMA, DOCK_KEY, self.previous], timeout=COMMAND_TIMEOUT_SECONDS)
             self.previous = ""
 
 
@@ -226,13 +246,14 @@ def start_fullscreen_helper(runner: Runner, platform: str) -> Optional[threading
     stop = threading.Event()
 
     def work() -> None:
+        """Poll for the kiosk window, then make it fullscreen and topmost."""
         for _ in range(WINDOW_POLLS):
             if stop.is_set():
                 return
-            listing = runner.run(["wmctrl", "-l"], timeout=5)
+            listing = runner.run(["wmctrl", "-l"], timeout=COMMAND_TIMEOUT_SECONDS)
             if listing is not None and WINDOW_TITLE in listing.stdout:
-                runner.run(["wmctrl", "-r", WINDOW_TITLE, "-b", "add,fullscreen"], timeout=5)
-                runner.run(["wmctrl", "-r", WINDOW_TITLE, "-b", "add,above"], timeout=5)
+                runner.run(["wmctrl", "-r", WINDOW_TITLE, "-b", "add,fullscreen"], timeout=COMMAND_TIMEOUT_SECONDS)
+                runner.run(["wmctrl", "-r", WINDOW_TITLE, "-b", "add,above"], timeout=COMMAND_TIMEOUT_SECONDS)
                 return
             runner.sleep(WINDOW_POLL_SECONDS)
 
@@ -275,7 +296,7 @@ def ensure_server(settings: Settings, view: str, port: int, runner: Runner,
     if not sys.platform.startswith("win"):
         kwargs["start_new_session"] = True
     child = runner.popen(server_command(settings, view, port), **kwargs)
-    _wait_for_server(child, port, runner, probe)
+    _wait_for_server(child, view, port, runner, probe)
     return child
 
 
@@ -286,11 +307,13 @@ def _same_folder(reported: object, wanted: Path) -> bool:
     return os.path.realpath(reported) == os.path.realpath(wanted)
 
 
-def _wait_for_server(child: subprocess.Popen, port: int, runner: Runner, probe: Callable[[int], Optional[dict]]) -> None:
+def _wait_for_server(child: subprocess.Popen, view: str, port: int, runner: Runner,
+                     probe: Callable[[int], Optional[dict]]) -> None:
     """Wait until the child's port answers.
 
     Parameters:
         child: The server process.
+        view: screensaver or slideshow (named in the hint).
         port: TCP port.
         runner: Provides sleep().
         probe: Reads /_showcase_info.json.
@@ -301,7 +324,7 @@ def _wait_for_server(child: subprocess.Popen, port: int, runner: Runner, probe: 
     while waited <= SERVER_WAIT_SECONDS:
         if child.poll() is not None:
             raise LaunchError(f"the showcase server stopped at start (exit code {child.returncode}); "
-                              f"run `python3 showcase.py serve --port {port}` to see why")
+                              f"run `python3 showcase.py serve --view {view} --port {port}` to see why")
         info = probe(port)
         if info is not None and info.get("app") == APP_NAME:
             return
@@ -321,7 +344,7 @@ def stop_child(child: Optional[subprocess.Popen]) -> None:
         return
     child.terminate()
     try:
-        child.wait(timeout=CHILD_STOP_SECONDS)
+        child.wait(timeout=COMMAND_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         child.kill()
         child.wait()
@@ -340,11 +363,27 @@ def _open_screensaver(url: str, runner: Runner, platform: str, child: Optional[s
     if browser:
         profile = Path.home() / PROFILE_SUBDIR
         profile.mkdir(parents=True, exist_ok=True)
-        runner.run(chrome_kiosk_command(browser, url, profile))
+        _run_browser(runner, chrome_kiosk_command(browser, url, profile))
     elif runner.which("firefox"):
-        runner.run(["firefox", "--kiosk", url])
+        _run_browser(runner, ["firefox", "--kiosk", url])
     else:
         _open_default(url, runner, platform, child, prefer_xdg=True)
+
+
+def _run_browser(runner: Runner, command: Sequence[str]) -> None:
+    """Run a kiosk browser until it exits.
+
+    Parameters:
+        runner: Starts the program.
+        command: The browser command line.
+    Raises:
+        LaunchError: The browser could not be started; the message says why.
+    """
+    try:
+        runner.run_foreground(command)
+    except OSError as exc:
+        raise LaunchError(f"the browser {command[0]} could not be started ({exc.strerror or exc}); "
+                          f"open the page yourself, or install Chrome or Chromium") from exc
 
 
 def _open_default(url: str, runner: Runner, platform: str, child: Optional[subprocess.Popen],
@@ -360,10 +399,13 @@ def _open_default(url: str, runner: Runner, platform: str, child: Optional[subpr
             screensaver's last-resort fallback).
     """
     if prefer_xdg and platform.startswith("linux") and runner.which("xdg-open"):
-        runner.run(["xdg-open", url])
+        _run_browser(runner, ["xdg-open", url])
     elif not runner.open_url(url):
         print(f"showcase: no browser was found; open {url} yourself.")
-    print("Press Ctrl+C in this window to stop the server.")
+    if child is None:
+        print("This server belongs to another window; Ctrl+C here only closes this launcher.")
+    else:
+        print("Press Ctrl+C in this window to stop the server.")
     _wait_until_interrupted(child, runner)
 
 
@@ -379,26 +421,40 @@ def _wait_until_interrupted(child: Optional[subprocess.Popen], runner: Runner) -
         print()
 
 
-def _exit_on_sigterm():
-    """Turn SIGTERM into a normal exit so the cleanup (dock, server child) still runs.
+def _termination_signals() -> list[int]:
+    """Return the signals that end a session: SIGTERM, and SIGHUP where it exists (closing the terminal)."""
+    names = ("SIGTERM", "SIGHUP")
+    return [getattr(signal, name) for name in names if hasattr(signal, name)]
+
+
+def _exit_on_termination() -> dict:
+    """Turn SIGTERM and SIGHUP into a normal exit so the cleanup (dock, server child) still runs.
+
+    Closing the terminal sends SIGHUP; without this the server child (its own session)
+    would keep running and the dock setting would stay changed.
 
     Returns:
-        The previous handler (for restore_sigterm), or None when it could not be changed.
+        The previous handlers by signal number (for _restore_termination); empty when
+        they could not be changed.
     """
     def handler(signum, frame):  # noqa: ARG001
+        """Raise SystemExit so the finally blocks run."""
         raise SystemExit(128 + signum)
 
-    try:
-        return signal.signal(signal.SIGTERM, handler)
-    except ValueError:
-        # Not the main thread (a test harness): the default handling stays.
-        return None
+    previous = {}
+    for number in _termination_signals():
+        try:
+            previous[number] = signal.signal(number, handler)
+        except ValueError:
+            # Not the main thread (a test harness): the default handling stays.
+            continue
+    return previous
 
 
-def _restore_sigterm(previous) -> None:
-    """Put back the SIGTERM handler that _exit_on_sigterm replaced."""
-    if previous is not None:
-        signal.signal(signal.SIGTERM, previous)
+def _restore_termination(previous: dict) -> None:
+    """Put back the handlers that _exit_on_termination replaced."""
+    for number, handler in previous.items():
+        signal.signal(number, handler)
 
 
 def run_view(settings: Settings, view: str, port: int, runner: Optional[Runner] = None,
@@ -420,8 +476,8 @@ def run_view(settings: Settings, view: str, port: int, runner: Optional[Runner] 
     """
     runner = runner or Runner()
     platform = platform or sys.platform
-    previous_handler = _exit_on_sigterm()
-    url = f"http://{HOST}:{port}/{view}.html"
+    previous_handlers = _exit_on_termination()
+    url = f"http://{LOOPBACK_HOST}:{port}/{view}.html"
     dock = DockToggle(runner, platform if view == "screensaver" else "none")
     helper = None
     child = None
@@ -435,13 +491,17 @@ def run_view(settings: Settings, view: str, port: int, runner: Optional[Runner] 
             _open_screensaver(url, runner, platform, child)
         else:
             _open_default(url, runner, platform, child)
-        return 0
+        return EXIT_OK
     except LaunchError as exc:
         print(f"showcase: error: {exc}", file=sys.stderr)
-        return 1
+        return EXIT_USAGE
+    except KeyboardInterrupt:
+        # Ctrl+C is the normal way to end a session; the finally block cleans up.
+        print()
+        return EXIT_OK
     finally:
         if helper is not None:
             helper.set()
         dock.restore()
         stop_child(child)
-        _restore_sigterm(previous_handler)
+        _restore_termination(previous_handlers)

@@ -63,7 +63,7 @@
     object-fit: cover;
   }
 
-  /* Caption overlay anchored to each card — moves with the image */
+  /* Caption overlay anchored to each card: moves with the image */
   .cap {
     position: absolute; left: 0; right: 0; bottom: 0;
     padding: 28px clamp(20px, 2.5vw, 44px) 36px;
@@ -141,7 +141,7 @@
     transform: translate(-50%, -50%);
     text-align: center; z-index: 80;
     pointer-events: none;
-    max-width: 640px; padding: 36px;
+    width: min(640px, calc(100vw - 32px)); padding: 36px;
     color: var(--bone);
     transition: opacity 0.4s;
   }
@@ -155,13 +155,16 @@
     font-family: var(--mono); font-size: 13px; color: var(--magenta-soft);
     background: rgba(226,0,116,0.08); padding: 2px 6px;
     border: 1px solid rgba(226,0,116,0.25);
+    white-space: nowrap;
   }
+  /* A folder name may be long: it wraps as a whole, never mid-chip elsewhere. */
+  #status code.folder { white-space: normal; overflow-wrap: anywhere; }
 
   #hint {
     position: fixed; bottom: 14px; right: 18px; z-index: 50;
-    font-family: var(--mono); font-size: 10px;
+    font-family: var(--mono); font-size: 12px;
     letter-spacing: 0.18em; text-transform: uppercase;
-    color: rgba(244,239,230,0.30);
+    color: rgba(244,239,230,0.50);
     pointer-events: none;
     text-shadow: 0 1px 4px rgba(0,0,0,0.8);
   }
@@ -273,17 +276,23 @@ function escapeHtml(s) {
   }[c]));
 }
 function codeText(s) { return `<code>${escapeHtml(s)}</code>`; }
+function folderText(s) { return `<code class="folder">${escapeHtml(s)}</code>`; }
+
+// Readable fallback when a slide has no caption: the title with dashes and underscores as spaces.
+function readableTitle(title) {
+  return String(title || '').replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
 
 // Turns the manifest into a slide list, or shows the reason it cannot and returns null.
 function slidesFromManifest(manifest) {
   if (manifest.error) {
     setStatus('Content folder not found',
-      `${codeText(manifest.content_dir || '')}<br><br>Set <code>content_dir</code> in <code>settings.local.json</code> or <code>settings.json</code> in the repository, then run <code>python3 showcase.py check</code>.`);
+      `${folderText(manifest.content_name || 'the content folder')}<br><br>Set <code>content_dir</code> in <code>settings.local.json</code> or <code>settings.json</code> in the repository, then run <code>python3 showcase.py check</code>.`);
     return null;
   }
   if (!Array.isArray(manifest.slides) || !manifest.slides.length) {
     setStatus('No slides',
-      `Add images or videos to ${codeText(manifest.content_name || 'the content folder')} and relaunch. <code>python3 showcase.py check</code> lists any file that is not shown and why.`);
+      `Add images or videos to ${folderText(manifest.content_name || 'the content folder')} and relaunch. <code>python3 showcase.py check</code> lists any file that is not shown and why.`);
     return null;
   }
   return manifest.slides;
@@ -327,12 +336,13 @@ function buildCard(slide) {
   const cap = document.createElement('div');
   cap.className = 'cap';
   const metaBits = ['<span class="rule"></span>'];
-  if (slide.number)  metaBits.push(`<span class="num">${escapeHtml(slide.number)}</span>`);
+  const hasNumber = typeof slide.number === 'string' && slide.number !== '';
+  if (hasNumber) metaBits.push(`<span class="num">${escapeHtml(slide.number)}</span>`);
   if (slide.chapter) {
-    if (slide.number) metaBits.push('<span class="sep">/</span>');
+    if (hasNumber) metaBits.push('<span class="sep">/</span>');
     metaBits.push(`<span class="chap">${escapeHtml(slide.chapter.toUpperCase())}</span>`);
   }
-  const text = slide.caption || slide.title;
+  const text = slide.caption || readableTitle(slide.title);
   cap.innerHTML = `
     <div class="cap-meta">${metaBits.join('')}</div>
     <div class="cap-text">${escapeHtml(text)}</div>
@@ -371,7 +381,7 @@ async function buildStrip() {
     for (const slide of state.slides) {
       const { card, media } = buildCard(slide);
       strip.appendChild(card);
-      // Only wait on the first copy — second copy reuses the same URLs from cache.
+      // Only wait on the first copy: second copy reuses the same URLs from cache.
       if (copy === 0) waiters.push(waitForMedia(media, slide.kind));
     }
   }
@@ -413,7 +423,7 @@ function tickClock() {
 }
 
 // ============================================================
-// Exit on any user input — but only after a grace period, and the
+// Exit on any user input: but only after a grace period, and the
 // first mouse position post-grace is taken as a baseline so a static
 // cursor doesn't auto-quit. Movement past EXIT_MOUSE_THRESHOLD_PX,
 // any click, or any key all trigger exit.
@@ -468,6 +478,8 @@ function adjustBrightness(delta) {
 // Boot
 // ============================================================
 (async function boot() {
+  tickClock();
+  setInterval(tickClock, 30000);
   if (location.protocol === 'file:') { showFileProtocolStatus(); return; }
   setStatus('Loading', 'Reading the content folder.');
   let manifest;
@@ -482,8 +494,6 @@ function adjustBrightness(delta) {
   state.slides = slides;
   setStatus('Loading', `Preparing ${state.slides.length} slides.`);
   await buildStrip();
-  tickClock();
-  setInterval(tickClock, 30000);
 })();
 </script>
 </body>

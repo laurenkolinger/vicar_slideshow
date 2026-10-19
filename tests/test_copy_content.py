@@ -5,10 +5,13 @@ Outputs: Test results.
 """
 
 import csv
+import errno
 import hashlib
 import os
+import threading
 import unittest
 from collections import namedtuple
+from pathlib import Path
 from unittest import mock
 
 from tests.helpers import TempDirTestCase, make_content, make_png
@@ -194,9 +197,115 @@ class CopyTests(TempDirTestCase):
         self.assertEqual((result.copied, result.failed), (3, 1))
         self.assertFalse((self.dst / "02-beta.png").exists())
 
+    def appear_after_copy(self, name, content=b"someone else"):
+        """Patch the copy step so `name` appears in the destination after planning, before it is placed."""
+        real = cc._copy_hashing
+
+        def racing(src, partial):
+            digest = real(src, partial)
+            if Path(src).name == name:
+                (self.dst / name).write_bytes(content)
+            return digest
+
+        return mock.patch.object(cc, "_copy_hashing", side_effect=racing)
+
+    def test_file_that_appears_after_planning_is_not_overwritten(self):
+        plan = plan_copy(self.src, self.dst)
+        with self.appear_after_copy("02-beta.png"):
+            result = execute_plan(plan, run_by="t", out=lambda s: None)
+        self.assertEqual((result.conflicts, result.copied, result.failed), (1, 3, 0))
+        self.assertEqual((self.dst / "02-beta.png").read_bytes(), b"someone else")
+        self.assertEqual(sha(self.dst / "10_gamma.png"), sha(self.src / "10_gamma.png"), "the rest still copied")
+        self.assertEqual([n for n in os.listdir(self.dst) if n.endswith(cc.PARTIAL_SUFFIX)], [])
+        self.assertEqual([r["file"] for r in self.rows() if r["action"] == "conflict"], ["02-beta.png"])
+
+    def test_case_variant_name_counts_as_a_conflict(self):
+        """On a case-insensitive folder os.link fails because A.jpg is a.jpg; simulate that failure."""
+        plan = plan_copy(self.src, self.dst)
+        real_link = os.link
+
+        def link(src, dst, **kw):
+            if Path(dst).name == "10_gamma.png":
+                raise FileExistsError(errno.EEXIST, "File exists", str(dst))
+            return real_link(src, dst, **kw)
+
+        with mock.patch.object(cc.os, "link", side_effect=link):
+            result = execute_plan(plan, run_by="t", out=lambda s: None)
+        self.assertEqual((result.conflicts, result.copied), (1, 3))
+        self.assertFalse((self.dst / "10_gamma.png").exists())
+
+    def test_without_hard_links_the_exclusive_create_guard_still_copies(self):
+        no_links = OSError(errno.EPERM, "links not supported")
+        with mock.patch.object(cc.os, "link", side_effect=no_links):
+            _, result = self.run_copy()
+        self.assertEqual((result.copied, result.conflicts, result.failed), (4, 0, 0))
+        self.assertEqual(sha(self.dst / "01_alpha.png"), sha(self.src / "01_alpha.png"))
+        self.assertEqual([n for n in os.listdir(self.dst) if n.endswith(cc.PARTIAL_SUFFIX)], [])
+
+    def test_without_hard_links_a_file_that_appeared_is_still_not_overwritten(self):
+        plan = plan_copy(self.src, self.dst)
+        no_links = OSError(errno.EPERM, "links not supported")
+        with mock.patch.object(cc.os, "link", side_effect=no_links), self.appear_after_copy("01_alpha.png"):
+            result = execute_plan(plan, run_by="t", out=lambda s: None)
+        self.assertEqual((result.conflicts, result.copied), (1, 3))
+        self.assertEqual((self.dst / "01_alpha.png").read_bytes(), b"someone else")
+
+    def test_present_file_that_vanishes_is_a_failure_not_a_crash(self):
+        self.run_copy()
+        plan = plan_copy(self.src, self.dst)
+        (self.dst / "01_alpha.png").unlink()
+        result = execute_plan(plan, run_by="t", out=lambda s: None)
+        self.assertEqual((result.failed, result.present), (1, 3))
+        self.assertIn("01_alpha.png", result.failures[0])
+        self.assertEqual([r["file"] for r in self.rows() if r["action"] == "failed"], ["01_alpha.png"])
+
+    def test_conflict_file_that_vanishes_before_replace_is_copied(self):
+        (self.dst / "02-beta.png").write_bytes(b"different")
+        plan = plan_copy(self.src, self.dst, replace=True)
+        (self.dst / "02-beta.png").unlink()
+        result = execute_plan(plan, run_by="t", out=lambda s: None)
+        self.assertEqual((result.failed, result.conflicts), (0, 0))
+        self.assertEqual(sha(self.dst / "02-beta.png"), sha(self.src / "02-beta.png"))
+
+    def test_captions_path_that_is_not_a_file_fails_before_anything_is_copied(self):
+        for bad in (self.tmp / "no-such.csv", self.tmp):
+            with self.assertRaises(CopyError) as ctx:
+                plan_copy(self.src, self.dst, captions_path=bad)
+            self.assertEqual(ctx.exception.exit_code, 2)
+            self.assertIn(str(bad), str(ctx.exception))
+        self.assertEqual(os.listdir(self.dst), [])
+
+    def test_long_file_name_copies(self):
+        name = "9_" + "a" * 244 + ".png"
+        self.assertEqual(len(name.encode()), 250)
+        (self.src / name).write_bytes(make_png())
+        _, result = self.run_copy()
+        self.assertEqual((result.failed, result.copied), (0, 5))
+        self.assertEqual(sha(self.dst / name), sha(self.src / name))
+
+    def test_partial_name_is_short_and_unique(self):
+        names = {cc._partial_path(self.dst).name for _ in range(5)}
+        self.assertEqual(len(names), 5)
+        self.assertTrue(all(len(n) < 40 for n in names))
+
+    def test_failure_to_remove_the_temporary_file_is_logged_and_keeps_the_result(self):
+        plan = plan_copy(self.src, self.dst)
+        real_unlink = Path.unlink
+
+        def unlink(self_path, *a, **k):
+            if self_path.name.startswith(cc.PARTIAL_PREFIX):
+                raise PermissionError(errno.EACCES, "Permission denied")
+            return real_unlink(self_path, *a, **k)
+
+        with mock.patch.object(Path, "unlink", unlink), self.assertLogs(cc.__name__, "WARNING") as logs:
+            result = execute_plan(plan, run_by="t", out=lambda s: None)
+        self.assertEqual((result.copied, result.failed), (4, 0))
+        self.assertIn("could not remove the temporary file", logs.output[0])
+        for leftover in self.dst.glob(cc.PARTIAL_PREFIX + "*"):
+            leftover.unlink()
+
     def test_concurrent_log_appends_keep_one_header(self):
         log = cc.CopyLog(self.dst, self.src, "t")
-        import threading
         threads = [threading.Thread(target=log.write, args=("copied", f"f{i}", 1, "x")) for i in range(20)]
         for t in threads: t.start()
         for t in threads: t.join()

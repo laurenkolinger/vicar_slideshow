@@ -46,11 +46,11 @@ ui:
       detached: true
       port: 8766
       serve_cmd: ["showcase.py", "serve", "--view", "screensaver", "--port", "8766"]
-      help: "Opens the auto-scrolling full-screen reel from the content folder named in settings.json. Move the mouse, click, or press any key to exit; Up and Down arrows dim and brighten. It runs on its own server (port 8766), so it keeps playing when VICARIUS restarts."
+      help: "Click to open the auto-scrolling full-screen reel from the content folder named in settings.json; move the mouse, click or press any key to exit, and use Up and Down to dim or brighten it. The reel runs on its own server (port 8766), so it keeps running when VICARIUS restarts."
     - key: "slideshow"
       label: "Open Slideshow"
       file: "slideshow.html"
       detached: true
       port: 8765
       serve_cmd: ["showcase.py", "serve", "--view", "slideshow", "--port", "8765"]
-      help: "Opens the manual slideshow and grid from the content folder named in settings.json. Space toggles the grid, arrow keys change slides, and F toggles full screen. It runs on its own server (port 8765), so it keeps playing when VICARIUS restarts."
+      help: "Click to open the manual slideshow and grid from the content folder named in settings.json; Space toggles the grid, the arrow keys change slides and F toggles full screen. The slideshow runs on its own server (port 8765), so it keeps running when VICARIUS restarts."

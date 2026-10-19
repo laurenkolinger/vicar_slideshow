@@ -19,6 +19,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests.helpers import REPO, FFMPEG, TempDirTestCase, make_content, make_png, make_repo, make_video
+from tests.test_content import make_undecodable
 from vicar_showcase import cli
 
 
@@ -54,6 +55,25 @@ class CliInProcessTests(TempDirTestCase):
         for text in (f"Content folder: {self.content}", "Chosen by: settings.json", "Videos: 0", "Images: 3",
                      "Slides: 3", "alpha  [image, caption]", "x.heic: file type .heic is not shown", "Warnings:", "Not shown:"):
             self.assertIn(text, out)
+
+    def test_check_text_with_no_slides_says_none(self):
+        empty = self.tmp / "empty"; empty.mkdir()
+        out = run_main(["check", "--content", str(empty)], self.repo)[1]
+        self.assertIn("Slides:\n  none\n", out)
+
+    def test_check_survives_a_file_name_that_is_not_utf8(self):
+        name = make_undecodable(self.content)
+        if name is None:
+            self.skipTest("this platform refuses file names that are not valid UTF-8")
+        code, out, err = run_main(["check"], self.repo)
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("file name is not valid UTF-8; rename it", out)
+        out.encode("utf-8")
+        code, out, err = run_main(["check", "--json"], self.repo)
+        self.assertEqual((code, err), (0, ""))
+        data = json.loads(out)
+        self.assertIn("file name is not valid UTF-8; rename it", [s["reason"] for s in data["skipped"]])
+        self.assertEqual(len(data["slides"]), 3)
 
     def test_check_text_reports_missing_caption(self):
         (self.content / "04_nocap.png").write_bytes(make_png())
@@ -157,6 +177,13 @@ class CliInProcessTests(TempDirTestCase):
         self.assertEqual(code, 0)
         self.assertIn("ffmpeg is not installed", out)
 
+    def test_make_thumbs_without_ffmpeg_names_the_grid_behaviour(self):
+        with mock.patch.object(cli, "make_all_thumbs", return_value={"videos": 2, "cached": 0, "made": 0, "failed": 2,
+                                                                      "ffmpeg_missing": 1}):
+            out = run_main(["make-thumbs"], self.repo)[1]
+        self.assertIn("The slideshow grid shows an empty cell for each video.", out)
+        self.assertNotIn("instead", out)
+
     def test_make_thumbs_missing_folder(self):
         self.assertEqual(run_main(["make-thumbs", "--content", str(self.tmp / "no")], self.repo)[0], 2)
 
@@ -188,6 +215,63 @@ class CliInProcessTests(TempDirTestCase):
         self.assertEqual(code, 0)
         self.assertEqual(sha(dest / "01_alpha.png"), sha(src / "01_alpha.png"))
         self.assertEqual(len(list((dest / "_superseded").glob("*/01_alpha.png"))), 1)
+
+    def test_copy_step_line_reflects_failures(self):
+        src = self.tmp / "src"; src.mkdir(); make_content(src)
+        dest = self.tmp / "dest"; dest.mkdir()
+        from vicar_showcase import copy_content as cc
+        real = cc.sha256_file
+        with mock.patch.object(cc, "sha256_file", side_effect=lambda p: "0" * 64 if str(p).endswith(".partial") else real(p)):
+            code, out, _ = run_main(["copy-content", "--from", str(src), "--to", str(dest)], self.repo)
+        self.assertEqual(code, 4)
+        self.assertIn("Step 2 incomplete: 4 file(s) failed", out)
+        self.assertNotIn("Step 2 complete", out)
+
+    def test_copy_file_that_appears_during_the_copy_exits_3(self):
+        src = self.tmp / "src"; src.mkdir(); make_content(src)
+        dest = self.tmp / "dest"; dest.mkdir()
+        from vicar_showcase import copy_content as cc
+        real = cc._copy_hashing
+
+        def racing(source, partial):
+            digest = real(source, partial)
+            if Path(source).name == "02-beta.png":
+                (dest / "02-beta.png").write_bytes(b"someone else")
+            return digest
+
+        with mock.patch.object(cc, "_copy_hashing", side_effect=racing):
+            code, out, err = run_main(["copy-content", "--from", str(src), "--to", str(dest)], self.repo)
+        self.assertEqual(code, 3)
+        self.assertEqual((dest / "02-beta.png").read_bytes(), b"someone else")
+        self.assertIn("Step 2 incomplete", out)
+        self.assertIn("02-beta.png", err)
+        self.assertEqual(sha(dest / "01_alpha.png"), sha(src / "01_alpha.png"))
+
+    def test_copy_destination_file_vanishing_mid_run_exits_4_without_traceback(self):
+        src = self.tmp / "src"; src.mkdir(); make_content(src)
+        dest = self.tmp / "dest"; dest.mkdir()
+        self.assertEqual(run_main(["copy-content", "--from", str(src), "--to", str(dest)], self.repo)[0], 0)
+        real_plan = cli.plan_copy
+
+        def plan_then_vanish(*args, **kwargs):
+            plan = real_plan(*args, **kwargs)
+            (dest / "01_alpha.png").unlink()
+            return plan
+
+        with mock.patch.object(cli, "plan_copy", side_effect=plan_then_vanish):
+            code, out, err = run_main(["copy-content", "--from", str(src), "--to", str(dest)], self.repo)
+        self.assertEqual(code, 4)
+        self.assertNotIn("Traceback", err)
+        self.assertIn("01_alpha.png", err)
+
+    def test_copy_captions_that_is_not_a_file_exits_2_and_copies_nothing(self):
+        src = self.tmp / "src"; src.mkdir(); make_content(src)
+        dest = self.tmp / "dest"; dest.mkdir()
+        code, _, err = run_main(["copy-content", "--from", str(src), "--to", str(dest),
+                                 "--captions", str(self.tmp / "missing.csv")], self.repo)
+        self.assertEqual(code, 2)
+        self.assertIn("missing.csv", err)
+        self.assertEqual(os.listdir(dest), [])
 
     def test_copy_destination_missing_exit_2(self):
         src = self.tmp / "src"; src.mkdir(); make_content(src)

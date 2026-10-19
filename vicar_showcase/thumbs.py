@@ -22,6 +22,8 @@ FFMPEG_SEEK_SECONDS = "0.5"
 THUMB_WIDTH_FILTER = "scale=480:-2"
 THUMB_QUALITY = "4"
 FFMPEG_TIMEOUT_SECONDS = 60
+# Videos come from a shared folder: read local files only, never a network URL a file might name.
+FFMPEG_PROTOCOLS = "file"
 
 Runner = Callable[..., "subprocess.CompletedProcess"]
 
@@ -88,7 +90,7 @@ def _lock_for(key: str) -> threading.Lock:
 
 
 def _ffmpeg_command(ffmpeg: str, video: Path, out: Path) -> list[str]:
-    """Build the ffmpeg command: one frame at 0.5 s, 480 px wide.
+    """Build the ffmpeg command: one frame at 0.5 s, 480 px wide, local files only, no stdin.
 
     Parameters:
         ffmpeg: The ffmpeg executable.
@@ -98,8 +100,8 @@ def _ffmpeg_command(ffmpeg: str, video: Path, out: Path) -> list[str]:
         The argument list.
     """
     return [
-        ffmpeg, "-y", "-loglevel", "error", "-ss", FFMPEG_SEEK_SECONDS, "-i", str(video),
-        "-vframes", "1", "-vf", THUMB_WIDTH_FILTER, "-q:v", THUMB_QUALITY, str(out),
+        ffmpeg, "-nostdin", "-y", "-loglevel", "error", "-protocol_whitelist", FFMPEG_PROTOCOLS,
+        "-ss", FFMPEG_SEEK_SECONDS, "-i", str(video), "-vframes", "1", "-vf", THUMB_WIDTH_FILTER, "-q:v", THUMB_QUALITY, str(out),
     ]
 
 
@@ -176,7 +178,7 @@ def _generate(exe: str, video: Path, final: Path, key: str, runner: Runner, time
         final.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
         return None
-    partial = final.parent / f".{key}.{threading.get_ident()}.partial.jpg"
+    partial = final.parent / f".{key}.{os.getpid()}.{threading.get_ident()}.partial.jpg"
     ok = _run_ffmpeg(_ffmpeg_command(exe, video, partial), partial, runner, timeout)
     try:
         if ok:

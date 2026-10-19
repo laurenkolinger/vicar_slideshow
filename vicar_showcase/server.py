@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import threading
 from dataclasses import dataclass
 from http import HTTPStatus
@@ -18,10 +19,11 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import unquote, urlsplit
 
-from .content import VIDEO_EXTENSIONS, resolve_media_file, scan_content
+from .common import LOCAL_HOST_NAMES, LOOPBACK_HOST
+from .content import THUMB_SUFFIX, VIDEO_EXTENSIONS, resolve_media_file, scan_content
+from .settings import DEFAULT_CAPTIONS_FILE
 from .thumbs import cached_thumb, default_thumbs_dir, ensure_thumb, make_all_thumbs
 
-BIND_HOST = "127.0.0.1"
 APP_NAME = "vicar-showcase"
 MANIFEST_SCHEMA = 2
 PAGES_SUBDIR = "slideshow"
@@ -47,7 +49,7 @@ class ServerState:
     content_dir: Path
     repo_dir: Path
     view: str
-    captions_file: str = "captions.csv"
+    captions_file: str = DEFAULT_CAPTIONS_FILE
     thumbs_dir: Optional[Path] = None
 
     def thumbs(self) -> Path:
@@ -119,26 +121,52 @@ def build_manifest(state: ServerState) -> dict:
     }
 
 
-def find_video_by_stem(content_dir: Path, stem: str) -> Optional[Path]:
-    """Find the first video file whose name without extension is `stem`.
+def find_video_by_name(state: ServerState, name: str) -> Optional[Path]:
+    """Find the video slide with this exact file name.
 
     Parameters:
-        content_dir: The content folder.
-        stem: File name without extension.
+        state: The server state (content folder and captions file name).
+        name: The full file name, for example "20_clip.mp4".
     Returns:
-        A safe path from resolve_media_file, or None.
+        The path when the scan would list `name` as a slide and it is a video, else None.
     """
-    try:
-        names = sorted(os.listdir(content_dir))
-    except OSError:
+    found = resolve_media_file(state.content_dir, name, state.captions_file)
+    if found is None or found.suffix.lower() not in VIDEO_EXTENSIONS:
         return None
-    for name in names:
-        suffix = Path(name).suffix
-        if suffix.lower() in VIDEO_EXTENSIONS and name[: len(name) - len(suffix)] == stem:
-            found = resolve_media_file(content_dir, name)
-            if found is not None:
-                return found
-    return None
+    return found
+
+
+def file_size(path: Path) -> int:
+    """Return a file's size in bytes.
+
+    Parameters:
+        path: The file.
+    Returns:
+        The size.
+    Raises:
+        OSError: The file cannot be read.
+    """
+    return path.stat().st_size
+
+
+def host_allowed(host_header: Optional[str], port: int) -> bool:
+    """Tell whether a Host header names this server on the loopback interface.
+
+    Parameters:
+        host_header: The request's Host header, or None.
+        port: The port the server listens on.
+    Returns:
+        True for 127.0.0.1 or localhost, with this port or without one. Any other
+        name (a rebound DNS name, for example) is refused.
+    Example:
+        host_allowed("localhost:8766", 8766) -> True; host_allowed("evil.example:8766", 8766) -> False
+    """
+    if not host_header:
+        return False
+    name, _sep, given_port = host_header.strip().lower().partition(":")
+    if name not in LOCAL_HOST_NAMES:
+        return False
+    return given_port in ("", str(port))
 
 
 def make_handler(state: ServerState) -> type[BaseHTTPRequestHandler]:
@@ -176,9 +204,14 @@ def make_handler(state: ServerState) -> type[BaseHTTPRequestHandler]:
             self._route(send_body=False)
 
         def _method_not_allowed(self) -> None:
-            """Refuse anything but GET and HEAD."""
+            """Refuse anything but GET and HEAD, and close the connection.
+
+            A refused request's body is never read, so the connection cannot be reused:
+            the unread body would be parsed as the next request.
+            """
+            self.close_connection = True
             self._send_bytes(HTTPStatus.METHOD_NOT_ALLOWED, b"GET and HEAD only\n", "text/plain; charset=utf-8",
-                             True, {"Allow": "GET, HEAD"})
+                             True, {"Allow": "GET, HEAD", "Connection": "close"})
 
         do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _method_not_allowed  # noqa: N815
 
@@ -188,6 +221,11 @@ def make_handler(state: ServerState) -> type[BaseHTTPRequestHandler]:
             Parameters:
                 send_body: False for HEAD.
             """
+            if not host_allowed(self.headers.get("Host"), self.server.server_address[1]):
+                self.close_connection = True
+                self._send_bytes(HTTPStatus.FORBIDDEN, b"Forbidden\n", "text/plain; charset=utf-8", True,
+                                 {"Connection": "close"})
+                return
             path = urlsplit(self.path).path
             if path == "/":
                 self._redirect(f"/{state.view}.html")
@@ -255,7 +293,7 @@ def make_handler(state: ServerState) -> type[BaseHTTPRequestHandler]:
         def _send_media(self, raw: str, send_body: bool) -> None:
             """Send a slide file, honouring one Range."""
             name = safe_name(raw)
-            path = resolve_media_file(state.content_dir, name) if name else None
+            path = resolve_media_file(state.content_dir, name, state.captions_file) if name else None
             if path is None:
                 self._not_found()
                 return
@@ -265,10 +303,10 @@ def make_handler(state: ServerState) -> type[BaseHTTPRequestHandler]:
         def _send_thumb(self, raw: str, send_body: bool) -> None:
             """Send (making it first if needed) a video's thumbnail."""
             name = safe_name(raw)
-            if not name or not name.endswith(".jpg"):
+            if not name or not name.endswith(THUMB_SUFFIX):
                 self._not_found()
                 return
-            video = find_video_by_stem(state.content_dir, name[: -len(".jpg")])
+            video = find_video_by_name(state, name[: -len(THUMB_SUFFIX)])
             thumb = None
             if video is not None:
                 thumb = cached_thumb(state.thumbs(), video) or ensure_thumb(state.thumbs(), video)
@@ -289,7 +327,7 @@ def make_handler(state: ServerState) -> type[BaseHTTPRequestHandler]:
                 range_header: The request's Range header, if any.
             """
             try:
-                size = path.stat().st_size
+                size = file_size(path)
                 handle = open(path, "rb")
             except OSError:
                 self._not_found()
@@ -321,6 +359,9 @@ def make_handler(state: ServerState) -> type[BaseHTTPRequestHandler]:
             while remaining > 0:
                 chunk = handle.read(min(STREAM_CHUNK_BYTES, remaining))
                 if not chunk:
+                    # The file shrank after the headers promised its length: close the
+                    # connection so the browser sees a short body instead of waiting.
+                    self.close_connection = True
                     break
                 self.wfile.write(chunk)
                 remaining -= len(chunk)
@@ -332,11 +373,11 @@ class QuietServer(ThreadingHTTPServer):
     """ThreadingHTTPServer that does not print tracebacks for cancelled requests."""
 
     daemon_threads = True
-    allow_reuse_address = True
+    # On Windows, SO_REUSEADDR lets a second server bind a port that is in use.
+    allow_reuse_address = os.name != "nt"
 
     def handle_error(self, request, client_address) -> None:  # noqa: D401
         """Ignore connection errors, report anything else to stderr."""
-        import sys
         if isinstance(sys.exc_info()[1], CONNECTION_ERRORS):
             return
         super().handle_error(request, client_address)
@@ -353,7 +394,7 @@ def make_server(state: ServerState, port: int) -> QuietServer:
     Raises:
         OSError: The port is in use or not allowed.
     """
-    return QuietServer((BIND_HOST, port), make_handler(state))
+    return QuietServer((LOOPBACK_HOST, port), make_handler(state))
 
 
 def start_thumb_worker(state: ServerState) -> threading.Thread:
@@ -365,6 +406,7 @@ def start_thumb_worker(state: ServerState) -> threading.Thread:
         The started daemon thread.
     """
     def work() -> None:
+        """Make every missing video thumbnail."""
         make_all_thumbs(scan_content(state.content_dir, state.captions_file), state.thumbs())
 
     thread = threading.Thread(target=work, name="showcase-thumbs", daemon=True)
